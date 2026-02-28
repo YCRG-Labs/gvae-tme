@@ -105,7 +105,7 @@ class Trainer:
             L_pred = self.loss_fn.prediction(data.y, outputs['predictions'])
             loss += self.gamma * L_pred
         metrics = {'total': loss.item(), 'adj': L_adj.item(), 'expr': L_expr.item(),
-                   'kl': L_kl.item(), 'contrast': L_contrast.item() if isinstance(L_contrast, float) else L_contrast.item(),
+                   'kl': L_kl.item(), 'contrast': L_contrast if isinstance(L_contrast, (int, float)) else L_contrast.item(),
                    'pred': L_pred.item()}
         return loss, metrics
     
