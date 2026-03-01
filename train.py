@@ -1,93 +1,120 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent / 'src'))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import torch
 import numpy as np
-import scanpy as sc
-import anndata
 import json
-
 from src.model import GVAEModel
 from src.trainer import Trainer
 from src.analysis import RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer
-from src.data_utils import prepare_graph_data
-
-
-def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10):
-    np.random.seed(42)
-    torch.manual_seed(42)
-    counts = np.random.poisson(2, size=(n_cells, n_genes))
-    patient_ids = np.random.choice(n_patients, n_cells)
-    patient_response = np.random.choice([0, 1], n_patients)
-    cell_response = patient_response[patient_ids]
-    coords = np.random.randn(n_cells, 2) * 100
-    adata = anndata.AnnData(X=counts)
-    adata.obs['patient_id'] = [f'P{i:03d}' for i in patient_ids]
-    adata.obs['response'] = cell_response
-    adata.obsm['spatial'] = coords
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
-    sc.pp.normalize_total(adata, target_sum=10000)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata, n_top_genes=min(1000, n_genes))
-    sc.pp.pca(adata, n_comps=50)
-    return adata
-
+from src.data_utils import prepare_graph_data, create_synthetic_data
 
 def main():
-    config = {'n_cells': 5000, 'n_genes': 2000, 'n_patients': 10,
-              'hidden_dim': 64, 'latent_dim': 32, 'n_heads': 4, 'dropout': 0.2,
-              'lambda1': 1.0, 'lambda2': 0.5, 'beta': 0.01, 'gamma': 0.1,
-              'lr': 1e-3, 'epochs_phase1': 100, 'epochs_phase2': 50,
-              'patience': 20, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
+    config = {
+        'n_cells': 5000,
+        'n_genes': 2000,
+        'n_patients': 10,
+        'hidden_dim': 64,
+        'latent_dim': 32,
+        'n_heads': 4,
+        'dropout': 0.2,
+        'n_neg_samples': 5,
+        'lambda1': 1.0,
+        'lambda2': 0.5,
+        'beta': 0.01,
+        'beta_warmup_epochs': 50,
+        'gamma': 0.1,
+        'lr': 1e-3,
+        'epochs_phase1': 100,
+        'epochs_phase2': 50,
+        'patience': 50,
+        'max_grad_norm': 1.0,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    }
     
+    print("Creating synthetic data...")
     adata = create_synthetic_data(config['n_cells'], config['n_genes'], config['n_patients'])
-    data = prepare_graph_data(adata)
+    print(f"  {adata.n_obs} cells, {adata.n_vars} genes after QC")
     
-    model = GVAEModel(n_features=data.x.size(1), n_genes=data.x_raw.size(1),
-                      hidden_dim=config['hidden_dim'], latent_dim=config['latent_dim'],
-                      n_heads=config['n_heads'], dropout=config['dropout'], use_predictor=True)
+    print("Building graph...")
+    data = prepare_graph_data(adata)
+    print(f"  {data.edge_index.size(1)} edges, "
+          f"{data.pos_pairs.size(0)} positive pairs, "
+          f"{data.neg_pairs.size(0)} negative pairs")
+    
+    model = GVAEModel(
+        n_features=data.x.size(1),
+        n_genes=data.x_raw.size(1),
+        hidden_dim=config['hidden_dim'],
+        latent_dim=config['latent_dim'],
+        n_heads=config['n_heads'],
+        dropout=config['dropout'],
+        n_neg_samples=config['n_neg_samples'],
+        use_predictor=True,
+    )
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: {total_params:,} parameters")
     
     trainer = Trainer(model, config, device=config['device'])
-    final_metrics = trainer.train(data)
+    phase1_metrics = trainer.train(data)
     
+    print("\n=== Downstream Analysis ===")
     model.eval()
+    data_eval = data.to(config['device'])
     with torch.no_grad():
-        outputs = model(data)
+        outputs = model(data_eval)
         z = outputs['z'].cpu().numpy()
         mu = outputs['mu'].cpu().numpy()
         logvar = outputs['logvar'].cpu().numpy()
+        gate_vals = outputs['gate_values'].cpu().numpy()
     
-    detector = RareCellDetector()
-    scores, is_rare = detector.detect(mu, logvar, eta=2.0)
-    rare_labels = detector.subcluster(z, is_rare, resolution=2.0) if is_rare.sum() > 10 else None
+    detector = RareCellDetector(threshold=2.0)
+    scores, is_rare = detector.detect(mu, logvar)
+    rare_labels = None
+    if is_rare.sum() > 10:
+        rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
+    print(f"Rare cells: {is_rare.sum()} / {len(is_rare)}")
     
     clusterer = ClusteringAnalyzer()
-    labels = clusterer.cluster(z, logvar=logvar, resolution=1.0)
+    labels, confidence = clusterer.cluster(z, logvar=logvar, resolution=1.0)
     eval_metrics = clusterer.evaluate(z, labels)
+    print(f"Clusters: {eval_metrics['n_clusters']}, Silhouette: {eval_metrics['silhouette']:.4f}")
     
     pred_metrics = {}
-    if 'predictions' in outputs:
-        y_true = data.y.cpu().numpy()
-        y_pred = outputs['predictions'].cpu().numpy()
+    if 'y_pred' in outputs and hasattr(data_eval, 'y'):
+        y_true = data_eval.y.cpu().numpy()
+        y_pred = outputs['y_pred'].detach().cpu().numpy()
         pred_metrics = PredictionAnalyzer.compute_metrics(y_true, y_pred)
+        print(f"AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f}")
+    
+    print(f"\nGate statistics: mean={gate_vals.mean():.3f}, "
+          f"std={gate_vals.std():.3f}, "
+          f"min={gate_vals.min():.3f}, max={gate_vals.max():.3f}")
     
     output_dir = Path('outputs')
     output_dir.mkdir(exist_ok=True)
     np.save(output_dir / 'embeddings.npy', z)
     np.save(output_dir / 'rare_cell_scores.npy', scores)
     np.save(output_dir / 'cluster_labels.npy', labels)
-    with open(output_dir / 'metrics.json', 'w') as f:
-        json.dump({'config': config, 'final_metrics': final_metrics,
-                   'clustering': eval_metrics, 'prediction': pred_metrics}, f, indent=2)
-    torch.save(model.state_dict(), output_dir / 'model.pt')
+    np.save(output_dir / 'gate_values.npy', gate_vals)
+    np.save(output_dir / 'confidence.npy', confidence)
     
-    print(f"Training complete. Outputs saved to {output_dir}/")
-    print(f"Detected {is_rare.sum()} rare cells, {eval_metrics['n_clusters']} clusters")
-    if pred_metrics:
-        print(f"AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f}")
-
+    results = {
+        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool))},
+        'phase1_metrics': phase1_metrics,
+        'clustering': eval_metrics,
+        'prediction': pred_metrics,
+        'rare_cells': {'n_rare': int(is_rare.sum()), 'threshold': 2.0},
+        'gate': {
+            'mean': float(gate_vals.mean()),
+            'std': float(gate_vals.std()),
+        },
+    }
+    with open(output_dir / 'metrics.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    torch.save(model.state_dict(), output_dir / 'model.pt')
+    print(f"\nOutputs saved to {output_dir}/")
 
 if __name__ == '__main__':
     main()

@@ -1,333 +1,163 @@
 import torch
-import torch.optim as optim
-import numpy as np
-from torch.nn.utils import clip_grad_norm_
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import MessagePassing
+from torch_geometric.utils import softmax
 
+class CellAdaptiveGate(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.w = nn.Parameter(torch.randn(in_dim) * 0.01)
+        self.b = nn.Parameter(torch.zeros(1))
 
-class GVAELoss:
-    """Loss functions for GVAE training."""
-    
-    @staticmethod
-    def zinb(x, rho, theta, pi, eps=1e-8):
-        """Zero-inflated negative binomial loss (Eq. 15)."""
-        theta = torch.clamp(theta, min=eps, max=1e6)
-        rho = torch.clamp(rho, min=eps)
-        pi = torch.clamp(pi, min=eps, max=1-eps)
-        
-        theta_plus_rho = theta + rho
-        zero_case = torch.log(pi + (1 - pi) * torch.pow(theta / theta_plus_rho, theta))
-        
-        log_gamma_x_theta = torch.lgamma(x + theta)
-        log_gamma_theta = torch.lgamma(theta)
-        log_gamma_x_1 = torch.lgamma(x + 1)
-        
-        nb_case = (torch.log(1 - pi) + log_gamma_x_theta - log_gamma_theta - log_gamma_x_1 +
-                   theta * torch.log(theta / theta_plus_rho) + x * torch.log(rho / theta_plus_rho))
-        
-        mask = (x == 0).float()
-        log_lik = mask * zero_case + (1 - mask) * nb_case
-        return -log_lik.mean()
-    
-    @staticmethod
-    def adjacency(A_true, A_pred, pos_weight=None):
-        """Weighted binary cross-entropy for graph reconstruction (Eq. 17)."""
-        if pos_weight is None:
-            n_pos = (A_true > 0).sum().float()
-            n_total = A_true.numel()
-            pos_weight = (n_total - n_pos) / (n_pos + 1e-8)
-        
-        weight = torch.where(A_true > 0, pos_weight, 1.0)
-        return torch.nn.functional.binary_cross_entropy(
-            A_pred, A_true.float(), weight=weight, reduction='mean'
-        )
-    
-    @staticmethod
-    def kl_divergence(mu, logvar):
-        """KL divergence for VAE regularization (Eq. 19)."""
-        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-        return kl.mean()
-    
-    @staticmethod
-    def contrastive(z, pos_pairs, neg_pairs, temperature=0.1):
-        """
-        Vectorized contrastive loss (Eq. 18) - FIXED from O(N^2) to O(N).
-        
-        Args:
-            z: Latent representations (N, D)
-            pos_pairs: Positive pairs (P, 2) indices
-            neg_pairs: Negative pairs (Q, 2) indices  
-            temperature: Temperature parameter tau
-        """
-        z_norm = torch.nn.functional.normalize(z, p=2, dim=1)
-        
-        z_i = z_norm[pos_pairs[:, 0]]  
-        z_j = z_norm[pos_pairs[:, 1]]  
-        pos_sim = (z_i * z_j).sum(dim=1) / temperature  
-        
-        unique_anchors = torch.unique(pos_pairs[:, 0])
-        
-        anchor_neg_sims = []
-        for anchor in unique_anchors:
-            neg_mask = neg_pairs[:, 0] == anchor
-            if neg_mask.sum() == 0:
-                continue
-            
-            z_anchor = z_norm[anchor].unsqueeze(0)  
-            z_negs = z_norm[neg_pairs[neg_mask, 1]]  
-            neg_sim = (z_anchor * z_negs).sum(dim=1) / temperature  
-            anchor_neg_sims.append(neg_sim)
-        
-        if len(anchor_neg_sims) == 0:
-            return torch.tensor(0.0, device=z.device)
-        
-        loss = 0.0
-        pos_idx = 0
-        for anchor in unique_anchors:
-            neg_mask = neg_pairs[:, 0] == anchor
-            if neg_mask.sum() == 0:
-                continue
-                
-            pos_mask = pos_pairs[:, 0] == anchor
-            anchor_pos_sims = pos_sim[pos_mask]
-            
-            anchor_negs = anchor_neg_sims.pop(0)
-            
-            for pos_s in anchor_pos_sims:
-                numerator = torch.exp(pos_s)
-                denominator = numerator + torch.exp(anchor_negs).sum()
-                loss -= torch.log(numerator / denominator)
-        
-        return loss / len(pos_pairs)
-    
-    @staticmethod
-    def prediction(y_true, y_pred):
-        """Binary cross-entropy for response prediction (Eq. 27)."""
-        return torch.nn.functional.binary_cross_entropy(y_pred, y_true.float())
+    def forward(self, x):
+        return torch.sigmoid(x @ self.w + self.b)
 
+class WeightedGATConv(MessagePassing):
+    def __init__(self, in_channels, out_channels, heads=1, concat=True, negative_slope=0.2, dropout=0.0, bias=True):
+        super().__init__(aggr='add', node_dim=0)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.heads = heads
+        self.concat = concat
+        self.negative_slope = negative_slope
+        self.dropout_p = dropout
+        self.W = nn.Linear(in_channels, heads * out_channels, bias=False)
+        self.att = nn.Parameter(torch.empty(1, heads, 2 * out_channels))
+        nn.init.xavier_uniform_(self.att)
+        total_out = heads * out_channels if concat else out_channels
+        self.bias = nn.Parameter(torch.zeros(total_out)) if bias else None
 
-class Trainer:
-    """Trainer with two-phase training and reconstruction monitoring."""
-    
-    def __init__(self, model, config, device='cpu'):
-        self.model = model.to(device)
-        self.config = config
-        self.device = device
-        
-        self.lambda1 = config.get('lambda1', 1.0)
-        self.lambda2 = config.get('lambda2', 0.5)
-        self.beta = config.get('beta', 0.01)
-        self.gamma = 0.0 
-        self.gamma_phase2 = config.get('gamma', 0.1)
-        
-        self.lr = config.get('lr', 1e-3)
-        self.lr_phase2 = self.lr / 10
-        self.epochs_phase1 = config.get('epochs_phase1', 300)
-        self.epochs_phase2 = config.get('epochs_phase2', 200)
-        self.patience = config.get('patience', 50)
-        
-        self.tolerance = 1.1 
-        self.max_gamma_reductions = 3
-        self.phase1_metrics = {}
-        
-        self.max_grad_norm = config.get('max_grad_norm', 1.0)
-        
-        self.loss_fn = GVAELoss()
-        self.optimizer = None
-        
-    def setup_optimizer(self, phase=1):
-        """Setup optimizer with phase-specific learning rate."""
-        lr = self.lr if phase == 1 else self.lr_phase2
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-    
-    def create_adjacency_matrix(self, edge_index, n_nodes):
-        """Create dense adjacency matrix from edge index."""
-        adj = torch.zeros(n_nodes, n_nodes, device=self.device)
-        adj[edge_index[0], edge_index[1]] = 1
-        return adj
-    
-    def compute_loss(self, outputs, data, phase=1):
-        """Compute total loss with all components (Eq. 20)."""
-        
-        adj_true = self.create_adjacency_matrix(
-            data.edge_index, data.x.size(0)
-        )
-        L_adj = self.loss_fn.adjacency(adj_true, outputs['adj_recon'])
-        
-        x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
-        L_expr = self.loss_fn.zinb(
-            x_raw, outputs['rho'], outputs['theta'], outputs['pi']
-        )
-        
-        L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'])
-        
-        L_contrast = 0.0
-        if hasattr(data, 'pos_pairs') and hasattr(data, 'neg_pairs'):
-            L_contrast = self.loss_fn.contrastive(
-                outputs['z'], data.pos_pairs, data.neg_pairs
-            )
-        
-        L_pred = 0.0
-        if phase == 2 and 'y_pred' in outputs and hasattr(data, 'y'):
-            L_pred = self.loss_fn.prediction(data.y, outputs['y_pred'])
-        
-        total_loss = (
-            L_adj + 
-            self.lambda1 * L_expr + 
-            self.lambda2 * L_contrast + 
-            self.beta * L_kl +
-            self.gamma * L_pred
-        )
-        
-        return {
-            'total': total_loss,
-            'adj': L_adj.item(),
-            'expr': L_expr.item(),
-            'kl': L_kl.item(),
-            'contrast': L_contrast.item() if isinstance(L_contrast, torch.Tensor) else L_contrast,
-            'pred': L_pred.item() if isinstance(L_pred, torch.Tensor) else L_pred
-        }
-    
-    @torch.no_grad()
-    def evaluate(self, data):
-        """Evaluate model on validation set."""
-        self.model.eval()
-        outputs = self.model(data)
-        
-        adj_true = self.create_adjacency_matrix(data.edge_index, data.x.size(0))
-        L_adj = self.loss_fn.adjacency(adj_true, outputs['adj_recon'])
-        
-        x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
-        L_expr = self.loss_fn.zinb(
-            x_raw, outputs['rho'], outputs['theta'], outputs['pi']
-        )
-        
-        return {
-            'loss_adj': L_adj.item(),
-            'loss_expr': L_expr.item()
-        }
-    
-    def train_epoch(self, data, phase=1):
-        """Train for one epoch with gradient clipping."""
-        self.model.train()
-        self.optimizer.zero_grad()
-        
-        outputs = self.model(data)
-        losses = self.compute_loss(outputs, data, phase)
-        
-        losses['total'].backward()
-        
-        clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-        
-        self.optimizer.step()
-        
-        return losses
-    
-    def train_phase1(self, data):
-        """Phase 1: Representation learning (Section 3.3.5)."""
-        print("=== Phase 1: Representation Learning ===")
-        self.setup_optimizer(phase=1)
-        
-        best_val_loss = float('inf')
-        patience_counter = 0
-        
-        for epoch in range(1, self.epochs_phase1 + 1):
-            losses = self.train_epoch(data, phase=1)
-            
-            if epoch % 10 == 0:
-                val_metrics = self.evaluate(data)
-                val_loss = val_metrics['loss_adj'] + val_metrics['loss_expr']
-                
-                print(f"Epoch {epoch:3d} | "
-                      f"L_adj={losses['adj']:.4f} "
-                      f"L_expr={losses['expr']:.4f} "
-                      f"L_kl={losses['kl']:.4f} "
-                      f"Val={val_loss:.4f}")
-                
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    
-                if patience_counter >= self.patience // 2:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-        
-        final_val = self.evaluate(data)
-        self.phase1_metrics = {
-            'loss_adj': final_val['loss_adj'],
-            'loss_expr': final_val['loss_expr'],
-            'epoch': epoch
-        }
-        
-        print(f"Phase 1 complete: L_adj={final_val['loss_adj']:.4f}, "
-              f"L_expr={final_val['loss_expr']:.4f}")
-        
-        return self.phase1_metrics
-    
-    def train_phase2(self, data):
-        """
-        Phase 2: Joint clinical fine-tuning with reconstruction monitoring.
-        
-        If reconstruction degrades beyond tolerance, gamma is reduced.
-        If it cannot be maintained, fall back to frozen encoder.
-        """
-        print("\n=== Phase 2: Joint Clinical Fine-Tuning ===")
-        self.gamma = self.gamma_phase2
-        self.setup_optimizer(phase=2)
-        
-        best_val_loss = float('inf')
-        patience_counter = 0
-        gamma_reductions = 0
-        
-        for epoch in range(1, self.epochs_phase2 + 1):
-            losses = self.train_epoch(data, phase=2)
-            
-            if epoch % 10 == 0:
-                val_metrics = self.evaluate(data)
-                val_loss = val_metrics['loss_adj'] + val_metrics['loss_expr']
-                
-                adj_degraded = val_metrics['loss_adj'] > self.tolerance * self.phase1_metrics['loss_adj']
-                expr_degraded = val_metrics['loss_expr'] > self.tolerance * self.phase1_metrics['loss_expr']
-                
-                if adj_degraded or expr_degraded:
-                    gamma_reductions += 1
-                    self.gamma /= 2
-                    print(f"WARNING: Reconstruction degraded (reduction {gamma_reductions}/{self.max_gamma_reductions})")
-                    print(f"  L_adj: {val_metrics['loss_adj']:.4f} vs {self.phase1_metrics['loss_adj']:.4f}")
-                    print(f"  L_expr: {val_metrics['loss_expr']:.4f} vs {self.phase1_metrics['loss_expr']:.4f}")
-                    print(f"  Reducing gamma to {self.gamma:.4f}")
-                    
-                    if gamma_reductions >= self.max_gamma_reductions:
-                        print("FATAL: Cannot maintain reconstruction quality. Stopping Phase 2.")
-                        print("Recommendation: Use frozen encoder (Phase 1 only).")
-                        break
-                
-                print(f"Epoch {epoch:3d} | "
-                      f"L_adj={losses['adj']:.4f} "
-                      f"L_expr={losses['expr']:.4f} "
-                      f"L_pred={losses['pred']:.4f} "
-                      f"gamma={self.gamma:.4f}")
-                
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    
-                if patience_counter >= self.patience // 2:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
-        
-        print("Phase 2 complete")
-    
-    def train(self, data):
-        """Full two-phase training pipeline."""
-        data = data.to(self.device)
-        
-        phase1_metrics = self.train_phase1(data)
-        
-        if self.model.use_predictor and hasattr(data, 'y'):
-            self.train_phase2(data)
-        
-        return phase1_metrics
+    def forward(self, x, edge_index, edge_weight=None):
+        H, C = self.heads, self.out_channels
+        x_proj = self.W(x).view(-1, H, C)
+        out = self.propagate(edge_index, x=x_proj, edge_weight=edge_weight)
+        out = out.view(-1, H * C) if self.concat else out.mean(dim=1)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
+
+    def message(self, x_i, x_j, edge_weight, index, ptr, size_i):
+        alpha = (torch.cat([x_i, x_j], dim=-1) * self.att).sum(dim=-1)
+        alpha = F.leaky_relu(alpha, self.negative_slope)
+        alpha = softmax(alpha, index, ptr, size_i)
+        alpha = F.dropout(alpha, p=self.dropout_p, training=self.training)
+        msg = x_j * alpha.unsqueeze(-1)
+        if edge_weight is not None:
+            msg = msg * edge_weight.view(-1, 1, 1)
+        return msg
+
+class GATEncoder(nn.Module):
+    def __init__(self, in_dim, hidden_dim=64, latent_dim=32, n_heads=4, dropout=0.2):
+        super().__init__()
+        self.gat1 = WeightedGATConv(in_dim, hidden_dim // n_heads, heads=n_heads, concat=True, dropout=dropout)
+        self.gat_mu = WeightedGATConv(hidden_dim, latent_dim, heads=1, concat=False, dropout=dropout)
+        self.gat_logvar = WeightedGATConv(hidden_dim, latent_dim, heads=1, concat=False, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, edge_index, edge_weight=None):
+        h = F.elu(self.gat1(x, edge_index, edge_weight))
+        h = self.dropout(h)
+        mu = self.gat_mu(h, edge_index, edge_weight)
+        logvar = self.gat_logvar(h, edge_index, edge_weight)
+        return mu, logvar
+
+class ZINBDecoder(nn.Module):
+    def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2):
+        super().__init__()
+        layers = []
+        prev = latent_dim
+        for hd in hidden_dims:
+            layers += [nn.Linear(prev, hd), nn.BatchNorm1d(hd), nn.ELU(), nn.Dropout(dropout)]
+            prev = hd
+        self.backbone = nn.Sequential(*layers)
+        self.rho_head = nn.Linear(prev, n_genes)
+        self.pi_head = nn.Linear(prev, n_genes)
+        self.log_theta = nn.Parameter(torch.zeros(n_genes))
+
+    def forward(self, z, library_size):
+        h = self.backbone(z)
+        rho = F.softmax(self.rho_head(h), dim=1) * library_size.unsqueeze(1)
+        theta = torch.exp(self.log_theta)
+        pi = torch.sigmoid(self.pi_head(h))
+        return rho, theta, pi
+
+class AdjacencyDecoder(nn.Module):
+    def __init__(self, n_neg_samples=5):
+        super().__init__()
+        self.n_neg = n_neg_samples
+
+    def forward(self, z, pos_edge_index, n_nodes):
+        z_src = z[pos_edge_index[0]]
+        z_dst = z[pos_edge_index[1]]
+        pos_scores = torch.sigmoid((z_src * z_dst).sum(dim=1))
+        neg_src = pos_edge_index[0].repeat_interleave(self.n_neg)
+        neg_dst = torch.randint(0, n_nodes, (neg_src.size(0),), device=z.device)
+        neg_scores = torch.sigmoid((z[neg_src] * z[neg_dst]).sum(dim=1))
+        return pos_scores, neg_scores
+
+class AttentionPooling(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.W = nn.Linear(latent_dim, latent_dim)
+        self.w = nn.Parameter(torch.randn(latent_dim) * 0.01)
+
+    def forward(self, z, mask):
+        scores = torch.tanh(self.W(z)) @ self.w
+        scores = scores.masked_fill(~mask, float('-inf'))
+        attn = F.softmax(scores, dim=0)
+        h_p = (attn.unsqueeze(1) * z).sum(dim=0)
+        return h_p, attn
+
+class ResponsePredictor(nn.Module):
+    def __init__(self, latent_dim):
+        super().__init__()
+        self.pooling = AttentionPooling(latent_dim)
+        self.classifier = nn.Linear(latent_dim, 1)
+
+    def forward(self, z, patient_masks):
+        preds, attns = [], []
+        for mask in patient_masks:
+            h_p, attn = self.pooling(z, mask)
+            pred = torch.sigmoid(self.classifier(h_p)).squeeze(-1)
+            preds.append(pred)
+            attns.append(attn)
+        return torch.stack(preds), attns
+
+class GVAEModel(nn.Module):
+    def __init__(self, n_features, n_genes, hidden_dim=64, latent_dim=32, n_heads=4, dropout=0.2, n_neg_samples=5, use_predictor=False):
+        super().__init__()
+        self.gate = CellAdaptiveGate(n_features)
+        self.encoder = GATEncoder(n_features, hidden_dim, latent_dim, n_heads, dropout)
+        self.adj_decoder = AdjacencyDecoder(n_neg_samples)
+        self.expr_decoder = ZINBDecoder(latent_dim, n_genes=n_genes, dropout=dropout)
+        self.use_predictor = use_predictor
+        if use_predictor:
+            self.predictor = ResponsePredictor(latent_dim)
+
+    @staticmethod
+    def reparameterize(mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+
+    def compute_hybrid_weights(self, x, mol_weight, spatial_weight, edge_index):
+        g = self.gate(x)
+        g_tgt = g[edge_index[1]]
+        hybrid = g_tgt * mol_weight + (1.0 - g_tgt) * spatial_weight
+        return hybrid, g
+
+    def forward(self, data):
+        x = data.x
+        edge_index = data.edge_index
+        hybrid_weight, gate_values = self.compute_hybrid_weights(x, data.mol_weight, data.spatial_weight, edge_index)
+        mu, logvar = self.encoder(x, edge_index, edge_weight=hybrid_weight)
+        z = self.reparameterize(mu, logvar)
+        pos_scores, neg_scores = self.adj_decoder(z, edge_index, x.size(0))
+        lib = data.library_size if hasattr(data, 'library_size') else x.sum(dim=1)
+        rho, theta, pi = self.expr_decoder(z, lib)
+        outputs = dict(z=z, mu=mu, logvar=logvar, pos_scores=pos_scores, neg_scores=neg_scores, rho=rho, theta=theta, pi=pi, gate_values=gate_values, hybrid_weight=hybrid_weight)
+        if self.use_predictor and hasattr(data, 'patient_masks'):
+            y_pred, attentions = self.predictor(z, data.patient_masks)
+            outputs['y_pred'] = y_pred
+            outputs['attentions'] = attentions
+        return outputs
