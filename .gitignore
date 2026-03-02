@@ -31,3 +31,4 @@ data/
 env/
 venv/
 .DS_Store
+/tests/

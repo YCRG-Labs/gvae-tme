@@ -32,6 +32,8 @@ def main():
         'max_grad_norm': 1.0,
         'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     }
+    output_dir = Path('outputs')
+    output_dir.mkdir(exist_ok=True)
     
     print("Creating synthetic data...")
     adata = create_synthetic_data(config['n_cells'], config['n_genes'], config['n_patients'])
@@ -56,7 +58,7 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {total_params:,} parameters")
     
-    trainer = Trainer(model, config, device=config['device'])
+    trainer = Trainer(model, config, device=config['device'], checkpoint_dir=output_dir)
     phase1_metrics = trainer.train(data)
     
     print("\n=== Downstream Analysis ===")
@@ -92,8 +94,6 @@ def main():
           f"std={gate_vals.std():.3f}, "
           f"min={gate_vals.min():.3f}, max={gate_vals.max():.3f}")
     
-    output_dir = Path('outputs')
-    output_dir.mkdir(exist_ok=True)
     np.save(output_dir / 'embeddings.npy', z)
     np.save(output_dir / 'rare_cell_scores.npy', scores)
     np.save(output_dir / 'cluster_labels.npy', labels)

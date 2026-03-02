@@ -5,6 +5,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.nn.utils import clip_grad_norm_
 from collections import defaultdict
 import numpy as np
+from pathlib import Path
 
 class GVAELoss:
     @staticmethod
@@ -72,7 +73,7 @@ class GVAELoss:
         return F.binary_cross_entropy(y_pred, y_true.float())
 
 class Trainer:
-    def __init__(self, model, config, device='cpu'):
+    def __init__(self, model, config, device='cpu', checkpoint_dir=None):
         self.model = model.to(device)
         self.config = config
         self.device = device
@@ -95,6 +96,22 @@ class Trainer:
         self.loss_fn = GVAELoss()
         self.optimizer = None
         self.scheduler = None
+        self.checkpoint_dir = None
+        if checkpoint_dir is not None:
+            self.checkpoint_dir = Path(checkpoint_dir)
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_checkpoint(self, suffix: str) -> None:
+        if self.checkpoint_dir is None:
+            return
+        checkpoint_path = self.checkpoint_dir / f"model_{suffix}.pt"
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "config": self.config,
+            "phase": suffix,
+        }
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Saved model checkpoint to {checkpoint_path}")
 
     def setup_optimizer(self, phase=1):
         lr = self.lr if phase == 1 else self.lr_phase2
@@ -177,6 +194,7 @@ class Trainer:
         final_val = self.evaluate(data)
         self.phase1_metrics = {'loss_adj': final_val['loss_adj'], 'loss_expr': final_val['loss_expr']}
         print(f"Phase 1 complete: L_adj={final_val['loss_adj']:.4f}, L_expr={final_val['loss_expr']:.4f}")
+        self.save_checkpoint("phase1")
         return self.phase1_metrics
 
     def train_phase2(self, data):
@@ -210,6 +228,7 @@ class Trainer:
                 if patience_counter >= self.patience // 10:
                     print(f"Early stopping at epoch {epoch}")
                     break
+        self.save_checkpoint("phase2")
         print("Phase 2 complete")
 
     def train(self, data):

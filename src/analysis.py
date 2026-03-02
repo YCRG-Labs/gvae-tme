@@ -1,8 +1,21 @@
-import numpy as np
-import torch
-import scanpy as sc
+import importlib.util
+import warnings
+
 import anndata
-from sklearn.metrics import (silhouette_score, roc_auc_score, average_precision_score, accuracy_score, precision_score, recall_score, f1_score)
+import numpy as np
+import scanpy as sc
+import torch
+from sklearn.metrics import (
+    silhouette_score,
+    roc_auc_score,
+    average_precision_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+)
+
+_HAS_LEIDEN = importlib.util.find_spec("leidenalg") is not None
 
 class RareCellDetector:
     def __init__(self, threshold=2.0):
@@ -31,6 +44,15 @@ class RareCellDetector:
             labels = np.full(len(z), -1, dtype=int)
             labels[is_rare] = 100
             return labels
+        if not _HAS_LEIDEN:
+            warnings.warn(
+                "leidenalg is not installed; returning a single rare-cell cluster "
+                "instead of performing Leiden subclustering.",
+                RuntimeWarning,
+            )
+            labels = np.full(len(z), -1, dtype=int)
+            labels[is_rare] = 100
+            return labels
         adata = anndata.AnnData(X=z_rare)
         adata.obsm['X_latent'] = z_rare
         n_neighbors = min(15, z_rare.shape[0] - 1)
@@ -50,17 +72,36 @@ class ClusteringAnalyzer:
         return np.exp(-sigma2_mean)
 
     def cluster(self, z, adjacency=None, logvar=None, resolution=1.0):
-        adata = anndata.AnnData(X=z)
-        adata.obsm['X_latent'] = z
-        if adjacency is not None:
-            import scipy.sparse as sp
-            if not sp.issparse(adjacency):
-                adjacency = sp.csr_matrix(adjacency)
-            adata.obsp['connectivities'] = adjacency
+        if _HAS_LEIDEN:
+            adata = anndata.AnnData(X=z)
+            adata.obsm['X_latent'] = z
+            if adjacency is not None:
+                import scipy.sparse as sp
+                if not sp.issparse(adjacency):
+                    adjacency = sp.csr_matrix(adjacency)
+                adata.obsp['connectivities'] = adjacency
+            else:
+                sc.pp.neighbors(adata, use_rep='X_latent', n_neighbors=15)
+            sc.tl.leiden(adata, resolution=resolution)
+            hard_labels = adata.obs['leiden'].astype(int).values
         else:
-            sc.pp.neighbors(adata, use_rep='X_latent', n_neighbors=15)
-        sc.tl.leiden(adata, resolution=resolution)
-        hard_labels = adata.obs['leiden'].astype(int).values
+            from sklearn.cluster import KMeans
+
+            if len(z) < 2:
+                hard_labels = np.zeros(len(z), dtype=int)
+            else:
+                n_clusters = max(2, int(resolution * 5))
+                n_clusters = min(n_clusters, len(z))
+                if n_clusters <= 1:
+                    hard_labels = np.zeros(len(z), dtype=int)
+                else:
+                    warnings.warn(
+                        "leidenalg is not installed; using KMeans clustering as a "
+                        "fallback instead of Leiden.",
+                        RuntimeWarning,
+                    )
+                    kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10)
+                    hard_labels = kmeans.fit_predict(z)
         if logvar is None:
             return hard_labels, np.ones(len(z))
         confidence = self.compute_confidence(logvar)
@@ -153,9 +194,16 @@ class PredictionAnalyzer:
     @staticmethod
     def compute_metrics(y_true, y_pred):
         y_bin = (y_pred > 0.5).astype(int)
+        try:
+            auroc = roc_auc_score(y_true, y_pred)
+            auprc = average_precision_score(y_true, y_pred)
+        except ValueError:
+            # Degenerate case: only one class present or invalid inputs.
+            auroc = 0.5
+            auprc = 0.0
         return {
-            'auroc': roc_auc_score(y_true, y_pred),
-            'auprc': average_precision_score(y_true, y_pred),
+            'auroc': auroc,
+            'auprc': auprc,
             'accuracy': accuracy_score(y_true, y_bin),
             'precision': precision_score(y_true, y_bin, zero_division=0),
             'recall': recall_score(y_true, y_bin, zero_division=0),
@@ -170,7 +218,12 @@ class PredictionAnalyzer:
             outputs = model(data)
             y_true = data.y.cpu().numpy()
             y_pred = outputs['y_pred'].cpu().numpy()
-        actual_auroc = roc_auc_score(y_true, y_pred)
+        try:
+            actual_auroc = roc_auc_score(y_true, y_pred)
+        except ValueError:
+            # If only one class is present, permutation test is not informative;
+            # fall back to a neutral AUROC.
+            actual_auroc = 0.5
         null_aurocs = np.zeros(n_permutations)
         for i in range(n_permutations):
             y_perm = np.random.permutation(y_true)
