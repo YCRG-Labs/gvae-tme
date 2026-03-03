@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -12,7 +15,7 @@ from src.data_utils import prepare_graph_data, create_synthetic_data
 
 def main():
     config = {
-        'n_cells': 5000,
+        'n_cells': 1000,
         'n_genes': 2000,
         'n_patients': 10,
         'hidden_dim': 64,

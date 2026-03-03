@@ -1,0 +1,19 @@
+Figure 1 (UMAP of GVAE latent space) visualizes the low-dimensional representation learned 
+by the GVAE from integrated molecular and relational structure. Cells are projected into a 
+two-dimensional manifold and colored by cluster identity, rare-cell score, and patient assignment 
+to provide complementary views of latent organization. The cluster panel highlights discrete 
+cell-state structure learned from graph-aware encoding, while the rare-score panel shows how
+uncertainty-derived rarity is distributed across the manifold rather than confined to a single 
+dense region. Together, these views support the interpretation that the GVAE embedding preserves 
+biologically meaningful heterogeneity and enables systematic identification of uncommon cellular 
+states within the tumor microenvironment.
+
+Figure 2 (spatial distribution of clusters and rare cells) examines how discovered cell states are 
+arranged across tissue coordinates and whether high rare-cell scores concentrate in localized niches. 
+The left panel maps cluster assignments in physical space to summarize mesoscale tissue architecture, 
+and the right panel overlays rare cells on the full cellular background to emphasize potential 
+spatially restricted subpopulations. This visualization is intended to test the central hypothesis
+that clinically relevant immunosuppressive programs can be both molecularly distinct and spatially 
+localized. In this project stage, spatial coordinates used for this figure are placeholder synthetic 
+values in the demo analysis script; therefore, Figure 2 should be treated as a layout/template 
+description until real spatial metadata are substituted.

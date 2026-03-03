@@ -23,6 +23,7 @@ Trains on 5K synthetic cells. Outputs saved to `outputs/`.
 - `src/analysis.py` - Rare cell detection, clustering, prediction
 - `src/data_utils.py` - Graph construction from AnnData
 - `train.py` - End-to-end pipeline
+- `analyze.py` - 
 
 ## Key Features
 
