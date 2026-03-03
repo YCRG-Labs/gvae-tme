@@ -74,7 +74,6 @@ DOWNLOADS = {
 
 
 def _run_scrublet(adata):
-    """Run Scrublet doublet detection and remove predicted doublets."""
     try:
         import scrublet as scr
         scrub = scr.Scrublet(adata.X)
@@ -241,9 +240,6 @@ def process_melanoma():
     meta["response"] = (meta_raw[resp_col_name].values == "Responder").astype(int)
     meta["therapy"] = meta_raw["characteristics: therapy"].values
 
-    # Fix GEO metadata inconsistency: some patients (P1, P4, P5, P28) have
-    # conflicting response labels across sequencing batches (e.g. Post_P1 vs
-    # Post_P1_2).  Resolve to a single label per patient via majority vote.
     for pid in meta["patient_id"].unique():
         pid_mask = meta["patient_id"] == pid
         resp_vals = meta.loc[pid_mask, "response"]
@@ -293,12 +289,13 @@ def process_melanoma():
 
     adata = _run_scrublet(adata)
 
+    adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
 
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -362,11 +359,12 @@ def process_breast():
 
     adata = _run_scrublet(adata)
 
+    adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -432,11 +430,12 @@ def process_colorectal():
 
     adata = _run_scrublet(adata)
 
+    adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -499,10 +498,11 @@ def process_nsclc():
         adata_sc.var["mt"] = adata_sc.var_names.str.startswith("MT-")
         sc.pp.calculate_qc_metrics(adata_sc, qc_vars=["mt"], inplace=True)
         adata_sc = adata_sc[adata_sc.obs["pct_counts_mt"] < 20].copy()
+        adata_sc.layers['counts'] = adata_sc.X.copy()
         sc.pp.normalize_total(adata_sc, target_sum=10000)
         sc.pp.log1p(adata_sc)
         n_top = min(2000, adata_sc.n_vars)
-        sc.pp.highly_variable_genes(adata_sc, n_top_genes=n_top)
+        sc.pp.highly_variable_genes(adata_sc, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
         n_comps = min(50, adata_sc.n_obs - 1, adata_sc.n_vars - 1)
         sc.pp.pca(adata_sc, n_comps=n_comps)
         coords = np.random.randn(adata_sc.n_obs, 2).astype(np.float32) * 100
@@ -566,10 +566,11 @@ def process_nsclc():
 
         sc.pp.filter_cells(adata_vis, min_genes=50)
         sc.pp.filter_genes(adata_vis, min_cells=3)
+        adata_vis.layers['counts'] = adata_vis.X.copy()
         sc.pp.normalize_total(adata_vis, target_sum=10000)
         sc.pp.log1p(adata_vis)
         n_top = min(2000, adata_vis.n_vars)
-        sc.pp.highly_variable_genes(adata_vis, n_top_genes=n_top)
+        sc.pp.highly_variable_genes(adata_vis, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
         n_comps = min(50, adata_vis.n_obs - 1, adata_vis.n_vars - 1)
         sc.pp.pca(adata_vis, n_comps=n_comps)
 
@@ -677,11 +678,12 @@ def process_nsclc_ici():
 
     adata = _run_scrublet(adata)
 
+    adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 

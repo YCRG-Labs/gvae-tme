@@ -1,5 +1,6 @@
 import importlib.util
 import warnings
+from pathlib import Path
 
 import anndata
 import numpy as np
@@ -203,7 +204,6 @@ class PredictionAnalyzer:
             auroc = roc_auc_score(y_true, y_pred)
             auprc = average_precision_score(y_true, y_pred)
         except ValueError:
-            # Degenerate case: only one class present or invalid inputs.
             auroc = 0.5
             auprc = 0.0
         tn = int(((y_bin == 0) & (y_true == 0)).sum())
@@ -231,8 +231,6 @@ class PredictionAnalyzer:
         try:
             actual_auroc = roc_auc_score(y_true, y_pred)
         except ValueError:
-            # If only one class is present, permutation test is not informative;
-            # fall back to a neutral AUROC.
             actual_auroc = 0.5
         null_aurocs = np.zeros(n_permutations)
         for i in range(n_permutations):
@@ -308,7 +306,6 @@ class BatchMixingAnalyzer:
         batch_idx = np.array([batch_map[b] for b in batch_labels])
         global_freq = np.bincount(batch_idx, minlength=n_batches) / n
 
-        # Subsample for speed
         if n > subsample:
             rng = np.random.RandomState(42)
             idx = rng.choice(n, subsample, replace=False)
@@ -324,7 +321,6 @@ class BatchMixingAnalyzer:
         for i, row in enumerate(neighbors):
             observed = np.bincount(batch_idx[row], minlength=n_batches)
             expected = global_freq * k
-            # Chi-squared statistic, only for bins with expected > 0
             mask = expected > 0
             chi2_stat = np.sum((observed[mask] - expected[mask]) ** 2 / expected[mask])
             df = mask.sum() - 1
@@ -581,7 +577,6 @@ class ClinicalAssociationTest:
         X = fractions_df.values.copy()
         feature_names = list(fractions_df.columns)
 
-        # Add therapy as dummy variables if provided
         if therapy is not None:
             therapy = np.asarray(therapy)
             unique_therapies = np.unique(therapy)
@@ -599,7 +594,6 @@ class ClinicalAssociationTest:
         except Exception as e:
             return {'features': [], 'note': f'Logit fit failed: {e}'}
 
-        # Extract results (skip constant at index 0)
         features = []
         pvals = []
         for i, name in enumerate(feature_names):
@@ -613,7 +607,6 @@ class ClinicalAssociationTest:
             })
             pvals.append(result.pvalues[idx])
 
-        # Benjamini-Hochberg FDR correction
         if len(pvals) > 0:
             from statsmodels.stats.multitest import multipletests
             reject, qvals, _, _ = multipletests(pvals, alpha=alpha, method='fdr_bh')
@@ -639,3 +632,159 @@ class ClinicalAssociationTest:
             sig_marker = '*' if f.get('significant', False) else ' '
             print(f"    {sig_marker} {f['name']}: coef={f['coef']:.3f}, "
                   f"p={f['p_value']:.4f}, q={f.get('q_value', 'N/A')}")
+
+
+class Cell2LocationWrapper:
+
+    @staticmethod
+    def deconvolve(adata_vis, adata_sc, max_epochs=30000, batch_size=2500):
+        try:
+            import cell2location
+            from cell2location.models import RegressionModel
+        except ImportError:
+            return {'note': 'cell2location not installed. pip install cell2location'}
+
+        RegressionModel.setup_anndata(adata_sc, labels_key='cell_type')
+        ref_model = RegressionModel(adata_sc)
+        ref_model.train(max_epochs=max_epochs, batch_size=batch_size, use_gpu=True)
+        adata_sc = ref_model.export_posterior(adata_sc)
+        inf_aver = adata_sc.varm['means_per_cluster_mu_fg'].copy()
+
+        cell2location.models.Cell2location.setup_anndata(adata_vis)
+        mod = cell2location.models.Cell2location(
+            adata_vis, cell_state_df=inf_aver,
+            N_cells_per_location=30, detection_alpha=20)
+        mod.train(max_epochs=max_epochs, batch_size=batch_size, use_gpu=True)
+        adata_vis = mod.export_posterior(adata_vis)
+
+        cell_abundances = adata_vis.obsm['q05_cell_abundance_w_sf'].copy()
+        return {
+            'cell_abundances': cell_abundances,
+            'cell_types': list(inf_aver.columns),
+            'n_spots': adata_vis.n_obs,
+        }
+
+
+class CellTypeAnnotator:
+
+    @staticmethod
+    def annotate(adata, model_name='Immune_All_Low.pkl'):
+        try:
+            import celltypist
+        except ImportError:
+            return {'note': 'celltypist not installed. pip install celltypist'}
+
+        celltypist.models.download_models(force_update=False, model=model_name)
+        model = celltypist.models.Model.load(model=model_name)
+        predictions = celltypist.annotate(adata, model=model, majority_voting=True)
+        adata.obs['cell_type'] = predictions.predicted_labels['majority_voting']
+
+        type_counts = adata.obs['cell_type'].value_counts().to_dict()
+        return {
+            'cell_types': type_counts,
+            'n_types': len(type_counts),
+            'model': model_name,
+        }
+
+    @staticmethod
+    def annotate_with_reference(adata, ref_adata, ref_label_key='cell_type'):
+        try:
+            import celltypist
+        except ImportError:
+            return {'note': 'celltypist not installed'}
+
+        new_model = celltypist.train(ref_adata, labels=ref_label_key, use_SGD=True)
+        predictions = celltypist.annotate(adata, model=new_model, majority_voting=True)
+        adata.obs['cell_type'] = predictions.predicted_labels['majority_voting']
+        return {
+            'cell_types': adata.obs['cell_type'].value_counts().to_dict(),
+            'n_types': adata.obs['cell_type'].nunique(),
+        }
+
+
+class LigandReceptorAnalyzer:
+
+    IMMUNE_LR_PAIRS = [
+        ('CCL5', 'CCR5'), ('CXCL9', 'CXCR3'), ('CXCL10', 'CXCR3'),
+        ('CXCL13', 'CXCR5'), ('CCL19', 'CCR7'), ('CCL21', 'CCR7'),
+        ('CD274', 'PDCD1'), ('CD80', 'CD28'), ('CD80', 'CTLA4'),
+        ('CD86', 'CD28'), ('CD86', 'CTLA4'), ('LGALS9', 'HAVCR2'),
+        ('TNFSF9', 'TNFRSF9'), ('FAS', 'FASLG'), ('IFNG', 'IFNGR1'),
+        ('TNF', 'TNFRSF1A'), ('IL2', 'IL2RA'), ('IL10', 'IL10RA'),
+        ('TGFB1', 'TGFBR1'), ('HLA-A', 'KIR2DL1'), ('HLA-B', 'KIR3DL1'),
+        ('VEGFA', 'FLT1'), ('VEGFA', 'KDR'), ('SPP1', 'CD44'),
+    ]
+
+    @staticmethod
+    def score_interactions(adata, labels, lr_pairs=None):
+        if lr_pairs is None:
+            lr_pairs = LigandReceptorAnalyzer.IMMUNE_LR_PAIRS
+
+        gene_set = set(adata.var_names)
+        valid_pairs = [(l, r) for l, r in lr_pairs if l in gene_set and r in gene_set]
+        if not valid_pairs:
+            return {'note': 'No L-R pairs found in gene set', 'n_valid': 0}
+
+        unique_clusters = sorted(np.unique(labels))
+        cluster_means = {}
+        for cl in unique_clusters:
+            mask = labels == cl
+            if hasattr(adata.X, 'toarray'):
+                cluster_means[cl] = np.asarray(adata[mask].X.toarray()).mean(axis=0)
+            else:
+                cluster_means[cl] = np.asarray(adata[mask].X).mean(axis=0)
+
+        var_to_idx = {g: i for i, g in enumerate(adata.var_names)}
+        interactions = []
+        for ligand, receptor in valid_pairs:
+            l_idx = var_to_idx[ligand]
+            r_idx = var_to_idx[receptor]
+            for cl_src in unique_clusters:
+                for cl_tgt in unique_clusters:
+                    l_expr = cluster_means[cl_src][l_idx]
+                    r_expr = cluster_means[cl_tgt][r_idx]
+                    score = float(l_expr * r_expr)
+                    if score > 0:
+                        interactions.append({
+                            'ligand': ligand,
+                            'receptor': receptor,
+                            'source': int(cl_src),
+                            'target': int(cl_tgt),
+                            'score': score,
+                        })
+
+        interactions.sort(key=lambda x: x['score'], reverse=True)
+        return {
+            'interactions': interactions[:100],
+            'n_valid_pairs': len(valid_pairs),
+            'n_clusters': len(unique_clusters),
+            'n_interactions': len(interactions),
+        }
+
+    @staticmethod
+    def cellphonedb_format(adata, labels, output_dir):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        meta = pd.DataFrame({
+            'Cell': adata.obs_names,
+            'cell_type': [str(l) for l in labels],
+        })
+        meta.to_csv(output_dir / 'meta.txt', sep='\t', index=False)
+
+        if hasattr(adata.X, 'toarray'):
+            counts = pd.DataFrame(
+                adata.X.toarray().T,
+                index=adata.var_names,
+                columns=adata.obs_names)
+        else:
+            counts = pd.DataFrame(
+                adata.X.T,
+                index=adata.var_names,
+                columns=adata.obs_names)
+        counts.to_csv(output_dir / 'counts.txt', sep='\t')
+
+        return {
+            'meta_path': str(output_dir / 'meta.txt'),
+            'counts_path': str(output_dir / 'counts.txt'),
+        }

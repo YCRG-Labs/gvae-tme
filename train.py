@@ -14,7 +14,8 @@ from src.model import GVAEModel
 from src.trainer import Trainer
 from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer,
                           BatchMixingAnalyzer, ClinicalAssociationTest,
-                          BiologicalValidation)
+                          BiologicalValidation, CrossDatasetAnalyzer,
+                          LigandReceptorAnalyzer)
 from src.data_utils import prepare_graph_data, create_synthetic_data
 from src.config import CONFIGS
 from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
@@ -38,7 +39,11 @@ def load_real_data(dataset_name, n_hvg=2000, max_cells=None):
         sc.pp.subsample(adata, n_obs=max_cells, random_state=42)
         print(f"  Subsampled to {adata.n_obs} cells")
     if 'highly_variable' not in adata.var.columns:
-        sc.pp.highly_variable_genes(adata, n_top_genes=min(n_hvg, adata.n_vars))
+        hvg_kwargs = {'n_top_genes': min(n_hvg, adata.n_vars)}
+        if 'counts' in adata.layers:
+            hvg_kwargs['flavor'] = 'seurat_v3'
+            hvg_kwargs['layer'] = 'counts'
+        sc.pp.highly_variable_genes(adata, **hvg_kwargs)
     adata = adata[:, adata.var['highly_variable']].copy()
     if 'X_pca' not in adata.obsm:
         n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
@@ -75,12 +80,11 @@ def build_model(config, data, use_predictor):
     )
 
 def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=None):
-    """Create appropriate trainer (full-batch or mini-batch)."""
+
     batch_size = config.get('batch_size')
     if batch_size is not None:
         try:
             from src.minibatch import MiniBatchTrainer, check_neighbor_loader
-            # Runtime check: NeighborLoader needs pyg-lib or torch-sparse
             if data is not None:
                 check_neighbor_loader(data, config.get('num_neighbors', [15, 10]))
             return MiniBatchTrainer(model, config, device=device,
@@ -142,6 +146,28 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         spatial_metrics = BiologicalValidation.morans_i(gate_vals, coords)
         print(f"Moran's I (gate): {spatial_metrics.get('morans_i', 0):.3f}, "
               f"p={spatial_metrics.get('p_value', 1):.4f}")
+        perm_result = BiologicalValidation.spatial_permutation_test(
+            gate_vals, coords, n_permutations=500)
+        spatial_metrics['permutation_test'] = perm_result
+        print(f"Spatial permutation test: p={perm_result['p_value']:.4f}")
+
+    marker_results = {}
+    gsea_results = {}
+    lr_results = {}
+    try:
+        markers = CrossDatasetAnalyzer.marker_genes(z, labels, adata)
+        marker_results = markers
+        gsea_results = BiologicalValidation.gsea_enrichment(markers)
+        if gsea_results and not gsea_results.get('note'):
+            n_enriched = sum(1 for v in gsea_results.values()
+                             if isinstance(v, list) and len(v) > 0)
+            print(f"GSEA: {n_enriched}/{len(gsea_results)} clusters with enriched pathways")
+        lr_results = LigandReceptorAnalyzer.score_interactions(adata, labels)
+        if lr_results.get('n_interactions', 0) > 0:
+            print(f"L-R interactions: {lr_results['n_interactions']} scored, "
+                  f"{lr_results['n_valid_pairs']} valid pairs")
+    except Exception as e:
+        print(f"  [warn] Marker/GSEA/LR analysis: {e}")
 
     batch_metrics = {}
     if 'patient_id' in adata.obs.columns:
@@ -202,6 +228,8 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
         'logreg_baseline': logreg_results,
         'clinical_association': clinical_results,
+        'gsea': gsea_results,
+        'ligand_receptor': lr_results,
     }
 
 
@@ -262,6 +290,53 @@ def run_single(args, config):
     torch.save(model.state_dict(), output_dir / 'model.pt')
     print(f"\nOutputs saved to {output_dir}/")
 
+INNER_HP_GRID = [
+    {'latent_dim': 16, 'lambda1': 0.5},
+    {'latent_dim': 32, 'lambda1': 1.0},
+    {'latent_dim': 64, 'lambda1': 1.0},
+    {'latent_dim': 32, 'lambda1': 0.5},
+    {'latent_dim': 32, 'lambda1': 2.0},
+]
+
+
+def inner_hp_select(config, data, train_pids, val_pids, unique_pids, patient_ids,
+                    device, hp_grid=None):
+    if hp_grid is None:
+        hp_grid = INNER_HP_GRID
+    best_loss = float('inf')
+    best_overrides = {}
+    for overrides in hp_grid:
+        trial_config = config.copy()
+        trial_config.update(overrides)
+        trial_config['hidden_dim'] = trial_config['n_heads'] * (
+            trial_config['latent_dim'] // trial_config['n_heads'] or 1)
+        trial_config['hidden_dim'] = max(trial_config['hidden_dim'],
+                                         trial_config['n_heads'] * 4)
+        trial_config['epochs_phase1'] = min(100, trial_config.get('epochs_phase1', 300))
+        trial_config['patience'] = 15
+
+        cell_train = np.array([pid in train_pids for pid in patient_ids])
+        cell_val = np.array([pid in val_pids for pid in patient_ids])
+        data.train_mask = torch.tensor(cell_train, dtype=torch.bool)
+        data.val_mask = torch.tensor(cell_val, dtype=torch.bool)
+
+        model = build_model(trial_config, data, use_predictor=False)
+        trainer = Trainer(model, trial_config, device=device)
+        try:
+            trainer.train(data)
+        except RuntimeError as e:
+            if 'out of memory' in str(e).lower():
+                torch.cuda.empty_cache()
+                continue
+            raise
+        val = trainer.evaluate(data.to(device))
+        val_loss = val['loss_adj'] + trial_config.get('lambda1', 1.0) * val['loss_expr']
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_overrides = overrides
+    return best_overrides, best_loss
+
+
 def run_cv(args, config, n_outer=5, n_permutations=1000):
     ablation = getattr(args, 'ablation', None)
     suffix = f'_{ablation}' if ablation else ''
@@ -318,6 +393,24 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
 
         print(f"  Train: {len(train_pids)} patients, Val: {len(val_pids)}, Test: {len(test_pids)}")
 
+        if args.inner_hp:
+            print(f"  Inner HP selection ({len(INNER_HP_GRID)} configs)...")
+            best_overrides, inner_loss = inner_hp_select(
+                config, data, train_pids, val_pids, unique_pids,
+                patient_ids, config['device'])
+            if best_overrides:
+                fold_config = config.copy()
+                fold_config.update(best_overrides)
+                fold_config['hidden_dim'] = fold_config['n_heads'] * (
+                    fold_config['latent_dim'] // fold_config['n_heads'] or 1)
+                fold_config['hidden_dim'] = max(fold_config['hidden_dim'],
+                                                fold_config['n_heads'] * 4)
+                print(f"  Selected: {best_overrides} (val_loss={inner_loss:.4f})")
+            else:
+                fold_config = config
+        else:
+            fold_config = config
+
         cell_train = np.array([pid in train_pids for pid in patient_ids])
         cell_val = np.array([pid in val_pids for pid in patient_ids])
         cell_test = np.array([pid in test_pids for pid in patient_ids])
@@ -329,9 +422,9 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         fold_dir = output_dir / f'fold_{fold}'
         fold_dir.mkdir(exist_ok=True)
 
-        model = build_model(config, data, use_predictor=True)
-        freeze = config.get('freeze_encoder', False)
-        trainer = make_trainer(model, config, config['device'], fold_dir, freeze_encoder=freeze, data=data)
+        model = build_model(fold_config, data, use_predictor=True)
+        freeze = fold_config.get('freeze_encoder', False)
+        trainer = make_trainer(model, fold_config, fold_config['device'], fold_dir, freeze_encoder=freeze, data=data)
         trainer.train(data)
 
         model.eval()
@@ -425,6 +518,8 @@ def main():
                         default=None, help='Ablation study to run')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Mini-batch size (enables NeighborLoader training)')
+    parser.add_argument('--inner-hp', action='store_true',
+                        help='Enable inner HP selection in nested CV')
     args = parser.parse_args()
 
     config = CONFIGS[args.config].copy()

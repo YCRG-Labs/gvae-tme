@@ -1,11 +1,3 @@
-"""Mini-batch training with neighbor sampling for large datasets.
-
-Uses PyTorch Geometric's NeighborLoader to process subsets of target nodes
-with their sampled 2-hop neighborhoods, enabling training on datasets that
-exceed GPU memory (e.g., 2M-cell Colorectal Visium HD).
-
-Requires pyg-lib or torch-sparse for NeighborLoader sampling.
-"""
 import torch
 import numpy as np
 from torch.nn.utils import clip_grad_norm_
@@ -16,19 +8,12 @@ from .trainer import Trainer, GVAELoss
 
 
 def check_neighbor_loader(data, num_neighbors, batch_size=2):
-    """Verify NeighborLoader actually works (needs pyg-lib or torch-sparse)."""
     loader = NeighborLoader(data, num_neighbors=num_neighbors, batch_size=batch_size)
-    _ = next(iter(loader))  # will raise ImportError if sampling backend missing
+    _ = next(iter(loader))
     return True
 
 
 class MiniBatchTrainer(Trainer):
-    """Trainer subclass that uses NeighborLoader for mini-batch training.
-
-    Phase 1 (representation learning) runs in mini-batches.
-    Phase 2 (clinical fine-tuning) accumulates patient embeddings across
-    batches, then computes prediction loss on the full set.
-    """
 
     def __init__(self, model, config, device='cpu', checkpoint_dir=None, freeze_encoder=False):
         super().__init__(model, config, device, checkpoint_dir, freeze_encoder)
@@ -55,8 +40,6 @@ class MiniBatchTrainer(Trainer):
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
             outputs = self.model(batch)
-
-            # For mini-batch: skip prediction loss (handled separately in Phase 2)
             losses = self._compute_batch_loss(outputs, batch, phase, epoch)
             losses['total'].backward()
             clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
@@ -68,7 +51,6 @@ class MiniBatchTrainer(Trainer):
 
         self.scheduler.step()
 
-        # Average over batches
         for k in epoch_losses:
             if k == 'total':
                 epoch_losses[k] = float(epoch_losses[k]) / max(n_batches, 1)
@@ -78,7 +60,6 @@ class MiniBatchTrainer(Trainer):
         return epoch_losses
 
     def _compute_batch_loss(self, outputs, batch, phase, epoch):
-        """Compute loss for a single mini-batch (no prediction loss)."""
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
         x_raw = batch.x_raw if hasattr(batch, 'x_raw') else batch.x
         if 'expr_mu' in outputs:
@@ -103,11 +84,9 @@ class MiniBatchTrainer(Trainer):
 
     @torch.no_grad()
     def evaluate(self, data):
-        """Full-graph evaluation (not mini-batched) for stable early stopping."""
         self.model.eval()
         rng_state = torch.random.get_rng_state()
         torch.manual_seed(0)
-        # Move full data to device for eval
         data_dev = data.to(self.device)
         outputs = self.model(data_dev)
         torch.random.set_rng_state(rng_state)
@@ -120,7 +99,6 @@ class MiniBatchTrainer(Trainer):
         return {'loss_adj': L_adj.item(), 'loss_expr': L_expr.item()}
 
     def train(self, data):
-        """Override: keep data on CPU for NeighborLoader, move batches to device."""
         phase1_metrics = self.train_phase1(data)
         if self.model.use_predictor and hasattr(data, 'y'):
             self.train_phase2(data)
@@ -160,7 +138,6 @@ class MiniBatchTrainer(Trainer):
         return self.phase1_metrics
 
     def train_phase2(self, data):
-        """Phase 2: prediction loss computed on full graph every N epochs."""
         print("\n=== Phase 2: Joint Clinical Fine-Tuning (mini-batch) ===")
         if self.freeze_encoder:
             print("  [ablation] Encoder frozen — only training predictor head")
@@ -172,13 +149,10 @@ class MiniBatchTrainer(Trainer):
         patience_counter = 0
         gamma_reductions = 0
         for epoch in range(1, self.epochs_phase2 + 1):
-            # Mini-batch training for reconstruction
             losses = self.train_epoch(data, phase=2, epoch=epoch)
-            # Full-graph prediction loss every 10 epochs
             if epoch % 10 == 0:
                 val = self.evaluate(data)
                 val_loss = val['loss_adj'] + val['loss_expr']
-                # Periodic full-graph prediction update
                 self.model.train()
                 data_dev = data.to(self.device)
                 self.optimizer.zero_grad()
@@ -195,7 +169,6 @@ class MiniBatchTrainer(Trainer):
                     clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                     self.optimizer.step()
                     losses['pred'] = L_pred.item()
-                # Reconstruction safeguard
                 adj_degraded = val['loss_adj'] > self.tolerance * self.phase1_metrics['loss_adj']
                 expr_degraded = val['loss_expr'] > self.tolerance * self.phase1_metrics['loss_expr']
                 if adj_degraded or expr_degraded:

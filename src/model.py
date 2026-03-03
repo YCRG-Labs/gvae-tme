@@ -66,7 +66,7 @@ class GATEncoder(nn.Module):
 
 
 class GCNEncoder(nn.Module):
-    """GCN encoder ablation: replaces GAT with standard GCN (no attention)."""
+
     def __init__(self, in_dim, hidden_dim=64, latent_dim=32, dropout=0.2):
         super().__init__()
         self.conv1 = GCNConv(in_dim, hidden_dim)
@@ -104,7 +104,7 @@ class ZINBDecoder(nn.Module):
 
 
 class GaussianDecoder(nn.Module):
-    """Gaussian likelihood ablation: replaces ZINB with simple Gaussian NLL."""
+
     def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2):
         super().__init__()
         layers = []

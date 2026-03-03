@@ -17,3 +17,7 @@ scrublet>=0.2.3
 # annoy>=1.17
 # Optional: gseapy for GSEA pathway enrichment
 # gseapy>=1.0
+# Optional: celltypist for automated cell type annotation
+# celltypist>=1.6
+# Optional: cell2location for spatial deconvolution
+# cell2location>=0.1

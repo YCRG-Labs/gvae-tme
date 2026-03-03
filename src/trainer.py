@@ -27,7 +27,7 @@ class GVAELoss:
 
     @staticmethod
     def gaussian(x, mu, logvar, eps=1e-8):
-        """Gaussian negative log-likelihood (ablation decoder)."""
+
         logvar = torch.clamp(logvar, min=-10, max=10)
         nll = 0.5 * (logvar + (x - mu).pow(2) / (logvar.exp() + eps))
         return nll.mean()
@@ -147,7 +147,6 @@ class Trainer:
     def compute_loss(self, outputs, data, phase=1, epoch=1):
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
 
-        # Expression loss: ZINB or Gaussian depending on decoder type
         x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
         if 'expr_mu' in outputs:
             L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar'])
@@ -181,15 +180,7 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, data):
-        """Evaluate reconstruction quality.
 
-        Note: this is a transductive GNN -- the full graph is used during both
-        training and evaluation (message passing requires neighbor features).
-        Reconstruction losses are computed over all nodes, which is standard
-        for graph autoencoders. A fixed seed makes the adjacency decoder's
-        negative sampling deterministic across eval calls so early-stopping
-        signals are stable.
-        """
         self.model.eval()
         rng_state = torch.random.get_rng_state()
         torch.manual_seed(0)

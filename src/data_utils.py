@@ -8,7 +8,6 @@ from scipy.spatial import cKDTree
 
 def _build_molecular_graph(pca, k=15):
     n = len(pca)
-    # Use Annoy for large datasets (>100K cells) if available
     if n > 100_000:
         try:
             from annoy import AnnoyIndex
@@ -123,7 +122,7 @@ def patient_level_split(adata, train_frac=0.7, val_frac=0.15, seed=42):
 
 
 def _get_patient_response(adata, pid):
-    """Get response for a patient, asserting all cells agree."""
+
     vals = adata.obs.loc[adata.obs['patient_id'] == pid, 'response'].unique()
     if len(vals) != 1:
         raise ValueError(
@@ -190,6 +189,61 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
         data.val_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(val_patients)], dtype=torch.long)
         data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(test_patients)], dtype=torch.long)
     return data
+
+
+class SplatterSimulator:
+
+    @staticmethod
+    def simulate(n_cells=5000, n_genes=2000, n_groups=5, de_prob=0.1,
+                 de_fac_loc=0.3, seed=42):
+        try:
+            import rpy2.robjects as ro
+            from rpy2.robjects import numpy2ri
+            numpy2ri.activate()
+            ro.r(f'''
+                suppressPackageStartupMessages({{
+                    library(splatter)
+                    library(scater)
+                }})
+                set.seed({seed})
+                params <- newSplatParams(
+                    nGenes={n_genes},
+                    batchCells={n_cells},
+                    group.prob=rep(1/{n_groups}, {n_groups}),
+                    de.prob={de_prob},
+                    de.facLoc={de_fac_loc},
+                    seed={seed}
+                )
+                sim <- splatSimulate(params, method="groups")
+                counts <- as.matrix(counts(sim))
+                groups <- colData(sim)$Group
+            ''')
+            counts = np.array(ro.r('counts')).T.astype(np.float32)
+            groups = list(ro.r('groups'))
+            numpy2ri.deactivate()
+
+            import anndata
+            import scanpy as sc
+            adata = anndata.AnnData(X=counts)
+            adata.obs['cell_type'] = groups
+            adata.obs['patient_id'] = [f'P{i % 10:03d}' for i in range(n_cells)]
+            patient_response = {f'P{i:03d}': int(i < 5) for i in range(10)}
+            adata.obs['response'] = [patient_response[p] for p in adata.obs['patient_id']]
+
+            coords = np.random.RandomState(seed).randn(n_cells, 2).astype(np.float32) * 100
+            adata.obsm['spatial'] = coords
+
+            sc.pp.filter_genes(adata, min_cells=3)
+            sc.pp.normalize_total(adata, target_sum=10000)
+            sc.pp.log1p(adata)
+            n_top = min(2000, adata.n_vars)
+            sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+            n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+            sc.pp.pca(adata, n_comps=n_comps)
+
+            return adata
+        except ImportError:
+            return None
 
 
 def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10, n_cell_types=8, seed=42):
