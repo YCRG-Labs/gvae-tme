@@ -136,7 +136,12 @@ class Trainer:
                 L_contrast = self.loss_fn.contrastive(outputs['z'], data.pos_pairs, data.neg_pairs)
         L_pred = torch.tensor(0.0, device=self.device)
         if phase == 2 and 'y_pred' in outputs and hasattr(data, 'y'):
-            L_pred = self.loss_fn.prediction(data.y, outputs['y_pred'])
+            if hasattr(data, 'train_patient_idx'):
+                y_train = data.y[data.train_patient_idx]
+                pred_train = outputs['y_pred'][data.train_patient_idx]
+                L_pred = self.loss_fn.prediction(y_train, pred_train)
+            else:
+                L_pred = self.loss_fn.prediction(data.y, outputs['y_pred'])
         total = L_adj + self.lambda1 * L_expr + self.lambda2 * L_contrast + beta * L_kl + self.gamma * L_pred
         return {
             'total': total,
@@ -192,10 +197,23 @@ class Trainer:
         if hasattr(self, '_best_state'):
             self.model.load_state_dict(self._best_state)
         final_val = self.evaluate(data)
-        self.phase1_metrics = {'loss_adj': final_val['loss_adj'], 'loss_expr': final_val['loss_expr']}
+        self.phase1_metrics = {'loss_adj': float(final_val['loss_adj']), 'loss_expr': float(final_val['loss_expr'])}
         print(f"Phase 1 complete: L_adj={final_val['loss_adj']:.4f}, L_expr={final_val['loss_expr']:.4f}")
         self.save_checkpoint("phase1")
         return self.phase1_metrics
+
+    @torch.no_grad()
+    def evaluate_prediction(self, data):
+        self.model.eval()
+        outputs = self.model(data)
+        if hasattr(data, 'val_patient_idx') and data.val_patient_idx.numel() > 0:
+            idx = data.val_patient_idx
+            y_val = data.y[idx]
+            pred_val = outputs['y_pred'][idx]
+            val_pred_loss = self.loss_fn.prediction(y_val, pred_val).item()
+        else:
+            val_pred_loss = 0.0
+        return val_pred_loss
 
     def train_phase2(self, data):
         print("\n=== Phase 2: Joint Clinical Fine-Tuning ===")
@@ -217,9 +235,10 @@ class Trainer:
                     print(f"  Reconstruction degraded (reduction {gamma_reductions}/{self.max_gamma_reductions})")
                     print(f"  gamma -> {self.gamma:.6f}")
                     if gamma_reductions >= self.max_gamma_reductions:
-                        print(" Cannot maintain reconstruction quality. Stopping Phase 2.")
+                        print("  Cannot maintain reconstruction quality. Stopping Phase 2.")
                         break
-                print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} L_pred={losses['pred']:.4f} gamma={self.gamma:.4f}")
+                val_pred = self.evaluate_prediction(data)
+                print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} L_pred={losses['pred']:.4f} val_pred={val_pred:.4f} gamma={self.gamma:.4f}")
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0

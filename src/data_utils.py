@@ -56,7 +56,6 @@ def _build_union_edges(mol_src, mol_dst, mol_wts, spa_src, spa_dst, spa_wts, n_c
 
 def _mine_contrastive_pairs(mol_idxs, coords, spatial_src, spatial_dst, r_far, k_neg=10):
     n_cells = len(coords)
-    tree = cKDTree(coords)
     pos_set = set()
     for s, d in zip(spatial_src, spatial_dst):
         pos_set.add((int(s), int(d)))
@@ -72,6 +71,20 @@ def _mine_contrastive_pairs(mol_idxs, coords, spatial_src, spatial_dst, r_far, k
                 count += 1
             if count >= k_neg:
                 break
+    if not neg_list:
+        pairwise_dists = np.array([np.linalg.norm(coords[int(mol_idxs[i][1])] - coords[i])
+                                   for i in range(n_cells)])
+        adaptive_r = np.percentile(pairwise_dists, 75)
+        for i in range(n_cells):
+            count = 0
+            for j in mol_idxs[i][1:]:
+                j = int(j)
+                dist = np.linalg.norm(coords[i] - coords[j])
+                if dist > adaptive_r:
+                    neg_list.append([i, j])
+                    count += 1
+                if count >= k_neg:
+                    break
     neg_pairs = torch.tensor(neg_list, dtype=torch.long) if neg_list else torch.zeros((0, 2), dtype=torch.long)
     return pos_pairs, neg_pairs
 
@@ -124,26 +137,62 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
         data.train_mask = torch.tensor(train_mask, dtype=torch.bool)
         data.val_mask = torch.tensor(val_mask, dtype=torch.bool)
         data.test_mask = torch.tensor(test_mask, dtype=torch.bool)
+        pid_to_idx = {pid: i for i, pid in enumerate(unique_pids)}
+        train_patients = set()
+        val_patients = set()
+        test_patients = set()
+        for i, pid in enumerate(patient_ids):
+            if train_mask[i]:
+                train_patients.add(pid)
+            elif val_mask[i]:
+                val_patients.add(pid)
+            else:
+                test_patients.add(pid)
+        data.train_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(train_patients)], dtype=torch.long)
+        data.val_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(val_patients)], dtype=torch.long)
+        data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(test_patients)], dtype=torch.long)
     return data
 
-def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10, seed=42):
+def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10, n_cell_types=8, seed=42):
     np.random.seed(seed)
     torch.manual_seed(seed)
-    counts = np.random.poisson(2, size=(n_cells, n_genes)).astype(np.float32)
+    cell_types = np.random.choice(n_cell_types, n_cells)
+    type_means = np.random.exponential(2.0, size=(n_cell_types, n_genes))
+    for ct in range(n_cell_types):
+        marker_start = ct * (n_genes // n_cell_types)
+        marker_end = marker_start + max(n_genes // (n_cell_types * 2), 10)
+        type_means[ct, marker_start:marker_end] *= 5.0
+    counts = np.zeros((n_cells, n_genes), dtype=np.float32)
+    for i in range(n_cells):
+        counts[i] = np.random.poisson(type_means[cell_types[i]])
     patient_ids = np.random.choice(n_patients, n_cells)
-    patient_response = np.random.choice([0, 1], n_patients)
+    responder_types = set(range(n_cell_types // 2))
+    patient_responder_frac = np.zeros(n_patients)
+    for pid in range(n_patients):
+        mask = patient_ids == pid
+        if mask.sum() > 0:
+            patient_responder_frac[pid] = np.mean(np.isin(cell_types[mask], list(responder_types)))
+    median_frac = np.median(patient_responder_frac)
+    patient_response = (patient_responder_frac > median_frac).astype(int)
     cell_response = patient_response[patient_ids]
-    coords = np.random.randn(n_cells, 2) * 100
+    centers = np.random.randn(n_cell_types, 2) * 200
+    coords = np.zeros((n_cells, 2))
+    for i in range(n_cells):
+        coords[i] = centers[cell_types[i]] + np.random.randn(2) * 30
     import anndata
     import scanpy as sc
     adata = anndata.AnnData(X=counts)
     adata.obs['patient_id'] = [f'P{i:03d}' for i in patient_ids]
     adata.obs['response'] = cell_response
+    adata.obs['cell_type'] = [f'type_{ct}' for ct in cell_types]
     adata.obsm['spatial'] = coords
-    sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_cells(adata, min_genes=10)
     sc.pp.filter_genes(adata, min_cells=3)
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata, n_top_genes=min(1000, n_genes))
-    sc.pp.pca(adata, n_comps=50)
+    n_top = min(1000, adata.n_vars)
+    if n_top >= 2:
+        sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+    sc.pp.pca(adata, n_comps=n_comps)
     return adata
