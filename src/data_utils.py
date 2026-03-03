@@ -104,19 +104,29 @@ def patient_level_split(adata, train_frac=0.7, val_frac=0.15, seed=42):
     test_mask = np.array([p in test_patients for p in patient_ids])
     return train_mask, val_mask, test_mask
 
-def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r_far_factor=5.0, k_neg=10):
+def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r_far_factor=5.0, k_neg=10, has_spatial=None):
     pca = adata.obsm['X_pca']
-    coords = adata.obsm[spatial_key]
     n_cells = pca.shape[0]
     x = torch.tensor(pca, dtype=torch.float32)
-    coords_t = torch.tensor(coords, dtype=torch.float32)
+    if has_spatial is None:
+        has_spatial = spatial_key in adata.obsm and not np.allclose(adata.obsm[spatial_key], 0)
     mol_src, mol_dst, mol_wts = _build_molecular_graph(pca, k=k_mol)
-    spa_src, spa_dst, spa_wts = _build_spatial_graph(coords, r=r_spatial)
-    edge_index, mol_weight, spatial_weight = _build_union_edges(mol_src, mol_dst, mol_wts, spa_src, spa_dst, spa_wts, n_cells)
-    nbrs = NearestNeighbors(n_neighbors=k_mol + 1, algorithm='auto').fit(pca)
-    _, mol_idxs = nbrs.kneighbors(pca)
-    r_far = r_spatial * r_far_factor
-    pos_pairs, neg_pairs = _mine_contrastive_pairs(mol_idxs, coords, spa_src, spa_dst, r_far, k_neg)
+    if has_spatial:
+        coords = adata.obsm[spatial_key]
+        coords_t = torch.tensor(coords, dtype=torch.float32)
+        spa_src, spa_dst, spa_wts = _build_spatial_graph(coords, r=r_spatial)
+        edge_index, mol_weight, spatial_weight = _build_union_edges(mol_src, mol_dst, mol_wts, spa_src, spa_dst, spa_wts, n_cells)
+        nbrs = NearestNeighbors(n_neighbors=k_mol + 1, algorithm='auto').fit(pca)
+        _, mol_idxs = nbrs.kneighbors(pca)
+        r_far = r_spatial * r_far_factor
+        pos_pairs, neg_pairs = _mine_contrastive_pairs(mol_idxs, coords, spa_src, spa_dst, r_far, k_neg)
+    else:
+        coords_t = torch.zeros((n_cells, 2), dtype=torch.float32)
+        edge_index = torch.tensor(np.array([mol_src, mol_dst]), dtype=torch.long)
+        mol_weight = torch.tensor(mol_wts, dtype=torch.float32)
+        spatial_weight = torch.zeros_like(mol_weight)
+        pos_pairs = torch.zeros((0, 2), dtype=torch.long)
+        neg_pairs = torch.zeros((0, 2), dtype=torch.long)
     raw_X = adata.X
     library_size = torch.tensor(np.asarray(raw_X.sum(axis=1)).flatten(), dtype=torch.float32)
     x_raw = torch.tensor(raw_X.toarray() if hasattr(raw_X, 'toarray') else np.asarray(raw_X), dtype=torch.float32)

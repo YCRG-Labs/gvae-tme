@@ -41,32 +41,39 @@ class GVAELoss:
         if pos_pairs.size(0) == 0 or neg_pairs.size(0) == 0:
             return torch.tensor(0.0, device=z.device)
         z_norm = F.normalize(z, p=2, dim=1)
-        anchor_to_pos = defaultdict(list)
-        for idx in range(pos_pairs.size(0)):
-            a = pos_pairs[idx, 0].item()
-            p = pos_pairs[idx, 1].item()
-            anchor_to_pos[a].append(p)
-        anchor_to_neg = defaultdict(list)
-        for idx in range(neg_pairs.size(0)):
-            a = neg_pairs[idx, 0].item()
-            n = neg_pairs[idx, 1].item()
-            anchor_to_neg[a].append(n)
-        valid_anchors = set(anchor_to_pos.keys()) & set(anchor_to_neg.keys())
-        if not valid_anchors:
+
+        pos_anchors = pos_pairs[:, 0]
+        neg_anchors = neg_pairs[:, 0]
+        valid_mask = torch.isin(pos_anchors, neg_anchors)
+        if not valid_mask.any():
             return torch.tensor(0.0, device=z.device)
-        loss = torch.tensor(0.0, device=z.device)
-        n_terms = 0
-        for a in valid_anchors:
-            z_a = z_norm[a]
-            pos_indices = torch.tensor(anchor_to_pos[a], device=z.device, dtype=torch.long)
-            neg_indices = torch.tensor(anchor_to_neg[a], device=z.device, dtype=torch.long)
-            pos_sims = (z_norm[pos_indices] * z_a.unsqueeze(0)).sum(dim=1) / temperature
-            neg_sims = (z_norm[neg_indices] * z_a.unsqueeze(0)).sum(dim=1) / temperature
-            neg_logsumexp = torch.logsumexp(neg_sims, dim=0)
-            for ps in pos_sims:
-                loss -= ps - torch.logaddexp(ps, neg_logsumexp)
-                n_terms += 1
-        return loss / max(n_terms, 1)
+        pos_pairs_v = pos_pairs[valid_mask]
+        pa = pos_pairs_v[:, 0]
+        pp = pos_pairs_v[:, 1]
+        pos_sims = (z_norm[pa] * z_norm[pp]).sum(dim=1) / temperature
+
+        na = neg_pairs[:, 0]
+        nn_ = neg_pairs[:, 1]
+        neg_sims = (z_norm[na] * z_norm[nn_]).sum(dim=1) / temperature
+
+        unique_anchors, inv = torch.unique(na, return_inverse=True)
+        neg_max = torch.full((unique_anchors.size(0),), -1e9, device=z.device)
+        neg_max.scatter_reduce_(0, inv, neg_sims, reduce='amax', include_self=False)
+        neg_shifted = neg_sims - neg_max[inv]
+        neg_exp = neg_shifted.exp()
+        neg_sumexp = torch.zeros(unique_anchors.size(0), device=z.device)
+        neg_sumexp.scatter_add_(0, inv, neg_exp)
+        neg_lse = neg_max + neg_sumexp.log()
+
+        anchor_to_idx = torch.full((z.size(0),), -1, device=z.device, dtype=torch.long)
+        anchor_to_idx[unique_anchors] = torch.arange(unique_anchors.size(0), device=z.device)
+        pos_neg_idx = anchor_to_idx[pa]
+        valid_pos = pos_neg_idx >= 0
+        pos_sims = pos_sims[valid_pos]
+        pos_neg_lse = neg_lse[pos_neg_idx[valid_pos]]
+
+        loss = -(pos_sims - torch.logaddexp(pos_sims, pos_neg_lse)).mean()
+        return loss
 
     @staticmethod
     def prediction(y_true, y_pred):
