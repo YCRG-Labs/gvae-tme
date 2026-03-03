@@ -71,7 +71,7 @@ class MiniBatchTrainer(Trainer):
         L_contrast = torch.tensor(0.0, device=self.device)
         if hasattr(batch, 'pos_pairs') and hasattr(batch, 'neg_pairs'):
             if batch.pos_pairs.size(0) > 0 and batch.neg_pairs.size(0) > 0:
-                L_contrast = self.loss_fn.contrastive(outputs['z'], batch.pos_pairs, batch.neg_pairs)
+                L_contrast = self.loss_fn.contrastive(outputs['z'], batch.pos_pairs, batch.neg_pairs, temperature=self.temperature)
         total = L_adj + self.lambda1 * L_expr + self.lambda2 * L_contrast + beta * L_kl
         return {
             'total': total,

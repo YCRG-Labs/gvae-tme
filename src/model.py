@@ -174,16 +174,13 @@ class GVAEModel(nn.Module):
         self.encoder_type = encoder_type
         self.decoder_type = decoder_type
 
-        # Gate (only used when gate_mode='learned')
         self.gate = CellAdaptiveGate(n_features)
 
-        # Encoder
         if encoder_type == 'gcn':
             self.encoder = GCNEncoder(n_features, hidden_dim, latent_dim, dropout)
         else:
             self.encoder = GATEncoder(n_features, hidden_dim, latent_dim, n_heads, dropout)
 
-        # Decoders
         self.adj_decoder = AdjacencyDecoder(n_neg_samples)
         if decoder_type == 'gaussian':
             self.expr_decoder = GaussianDecoder(latent_dim, n_genes=n_genes, dropout=dropout)

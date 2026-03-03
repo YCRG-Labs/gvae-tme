@@ -108,6 +108,7 @@ class Trainer:
         self.max_gamma_reductions = 3
         self.phase1_metrics = {}
         self.max_grad_norm = config.get('max_grad_norm', 1.0)
+        self.temperature = config.get('temperature', 0.1)
         self.loss_fn = GVAELoss()
         self.optimizer = None
         self.scheduler = None
@@ -158,7 +159,7 @@ class Trainer:
         L_contrast = torch.tensor(0.0, device=self.device)
         if hasattr(data, 'pos_pairs') and hasattr(data, 'neg_pairs'):
             if data.pos_pairs.size(0) > 0 and data.neg_pairs.size(0) > 0:
-                L_contrast = self.loss_fn.contrastive(outputs['z'], data.pos_pairs, data.neg_pairs)
+                L_contrast = self.loss_fn.contrastive(outputs['z'], data.pos_pairs, data.neg_pairs, temperature=self.temperature)
         L_pred = torch.tensor(0.0, device=self.device)
         if phase == 2 and 'y_pred' in outputs and hasattr(data, 'y'):
             if hasattr(data, 'train_patient_idx'):

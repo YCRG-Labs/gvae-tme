@@ -21,3 +21,7 @@ scrublet>=0.2.3
 # celltypist>=1.6
 # Optional: cell2location for spatial deconvolution
 # cell2location>=0.1
+# Optional: rpy2 for Splatter-based simulation
+# rpy2>=3.5
+# Optional: h5py for Visium HD feature slice reading
+# h5py>=3.8

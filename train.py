@@ -15,8 +15,9 @@ from src.trainer import Trainer
 from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer,
                           BatchMixingAnalyzer, ClinicalAssociationTest,
                           BiologicalValidation, CrossDatasetAnalyzer,
-                          LigandReceptorAnalyzer)
-from src.data_utils import prepare_graph_data, create_synthetic_data
+                          LigandReceptorAnalyzer, AttentionAnalyzer,
+                          Cell2LocationWrapper, CellTypeAnnotator)
+from src.data_utils import prepare_graph_data, create_synthetic_data, SplatterSimulator
 from src.config import CONFIGS
 from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
 
@@ -116,7 +117,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         gate_vals = outputs['gate_values'].cpu().numpy()
 
     rare_method = config.get('_rare_method', 'kl')
-    detector = RareCellDetector(threshold=2.0)
+    detector = RareCellDetector(threshold=config.get('rare_threshold', 2.0))
     if rare_method == 'leiden':
         print("  [ablation] Using Leiden-only rare cell detection")
         scores = np.zeros(len(z))
@@ -206,6 +207,54 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
                 fractions, response, therapy=therapy)
             ClinicalAssociationTest.summary(clinical_results)
 
+    attention_metrics = {}
+    attn_weights = outputs.get('attention_weights')
+    if attn_weights is not None and config.get('encoder_type', 'gat') == 'gat':
+        try:
+            edge_index = data_eval.edge_index.cpu()
+            sel = AttentionAnalyzer.selectivity(attn_weights.cpu(), edge_index, len(z))
+            attention_metrics['mean_selectivity'] = float(np.mean(sel))
+            attention_metrics['std_selectivity'] = float(np.std(sel))
+            if 'cell_type' in adata.obs.columns:
+                cell_types = adata.obs['cell_type'].values
+                interactions = AttentionAnalyzer.interaction_network(
+                    attn_weights.cpu(), edge_index, cell_types, len(z))
+                attention_metrics['n_interaction_pairs'] = len(interactions)
+                top_interactions = sorted(interactions.items(), key=lambda x: x[1], reverse=True)[:20]
+                attention_metrics['top_interactions'] = [
+                    {'source': k[0], 'target': k[1], 'count': v}
+                    for k, v in top_interactions
+                ]
+            print(f"Attention selectivity: {attention_metrics['mean_selectivity']:.3f} +/- "
+                  f"{attention_metrics['std_selectivity']:.3f}")
+        except Exception as e:
+            print(f"  [warn] Attention analysis: {e}")
+
+    pooling_map = {}
+    if 'y_pred' in outputs and 'attentions' in outputs:
+        try:
+            pooling_map = PredictionAnalyzer.pooling_attention_map(
+                outputs['attentions'], coords)
+            np.save(output_dir / 'pooling_attention.npy', pooling_map['attention_per_cell'])
+        except Exception:
+            pass
+
+    celltype_results = {}
+    try:
+        import celltypist
+        if 'cell_type' not in adata.obs.columns:
+            celltype_results = CellTypeAnnotator.annotate(adata)
+            if celltype_results.get('n_types', 0) > 0:
+                print(f"CellTypist: {celltype_results['n_types']} cell types annotated")
+    except ImportError:
+        pass
+
+    if lr_results.get('n_interactions', 0) > 0:
+        try:
+            LigandReceptorAnalyzer.cellphonedb_format(adata, labels, output_dir / 'cellphonedb')
+        except Exception:
+            pass
+
     print(f"\nGate: mean={gate_vals.mean():.3f}, std={gate_vals.std():.3f}")
 
     np.save(output_dir / 'embeddings.npy', z)
@@ -222,7 +271,8 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         'clustering': eval_metrics,
         'prediction': pred_metrics,
         'batch_mixing': batch_metrics,
-        'rare_cells': {'n_rare': int(is_rare.sum()), 'threshold': 2.0,
+        'rare_cells': {'n_rare': int(is_rare.sum()),
+                       'threshold': config.get('rare_threshold', 2.0),
                        'method': rare_method},
         'spatial_validation': spatial_metrics,
         'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
@@ -230,6 +280,8 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         'clinical_association': clinical_results,
         'gsea': gsea_results,
         'ligand_receptor': lr_results,
+        'attention': attention_metrics,
+        'cell_types': celltype_results,
     }
 
 
@@ -241,10 +293,15 @@ def run_single(args, config):
 
     if args.data == 'synthetic':
         print("Creating synthetic data...")
-        adata = create_synthetic_data(
-            config['n_cells'], config['n_genes'], config['n_patients'],
-            n_cell_types=config.get('n_cell_types', 8),
-        )
+        adata = SplatterSimulator.simulate(
+            n_cells=config['n_cells'], n_genes=config['n_genes'],
+            n_groups=config.get('n_cell_types', 8))
+        if adata is None:
+            print("  [info] Splatter unavailable, using built-in simulator")
+            adata = create_synthetic_data(
+                config['n_cells'], config['n_genes'], config['n_patients'],
+                n_cell_types=config.get('n_cell_types', 8),
+            )
         has_spatial = True
         graph_kwargs = {}
     else:
