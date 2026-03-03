@@ -19,7 +19,8 @@ wheels/
 .installed.cfg
 *.egg
 outputs/
-data/
+data/raw/
+data/processed/
 *.h5ad
 *.h5
 *.npy
