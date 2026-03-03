@@ -149,7 +149,12 @@ class GVAEModel(nn.Module):
     def forward(self, data):
         x = data.x
         edge_index = data.edge_index
-        hybrid_weight, gate_values = self.compute_hybrid_weights(x, data.mol_weight, data.spatial_weight, edge_index)
+        has_spatial = data.spatial_weight.any()
+        if has_spatial:
+            hybrid_weight, gate_values = self.compute_hybrid_weights(x, data.mol_weight, data.spatial_weight, edge_index)
+        else:
+            hybrid_weight = data.mol_weight
+            gate_values = torch.ones(x.size(0), device=x.device)
         mu, logvar = self.encoder(x, edge_index, edge_weight=hybrid_weight)
         z = self.reparameterize(mu, logvar)
         pos_scores, neg_scores = self.adj_decoder(z, edge_index, x.size(0))
