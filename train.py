@@ -148,7 +148,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         print(f"Moran's I (gate): {spatial_metrics.get('morans_i', 0):.3f}, "
               f"p={spatial_metrics.get('p_value', 1):.4f}")
         perm_result = BiologicalValidation.spatial_permutation_test(
-            gate_vals, coords, n_permutations=500)
+            gate_vals, coords, n_permutations=1000)
         spatial_metrics['permutation_test'] = perm_result
         print(f"Spatial permutation test: p={perm_result['p_value']:.4f}")
 
