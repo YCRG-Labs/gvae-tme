@@ -27,6 +27,7 @@ class WeightedGATConv(MessagePassing):
         nn.init.xavier_uniform_(self.att)
         total_out = heads * out_channels if concat else out_channels
         self.bias = nn.Parameter(torch.zeros(total_out)) if bias else None
+        self._alpha = None
 
     def forward(self, x, edge_index, edge_weight=None):
         H, C = self.heads, self.out_channels
@@ -41,6 +42,7 @@ class WeightedGATConv(MessagePassing):
         alpha = (torch.cat([x_i, x_j], dim=-1) * self.att).sum(dim=-1)
         alpha = F.leaky_relu(alpha, self.negative_slope)
         alpha = softmax(alpha, index, ptr, size_i)
+        self._alpha = alpha.detach()
         alpha = F.dropout(alpha, p=self.dropout_p, training=self.training)
         msg = x_j * alpha.unsqueeze(-1)
         if edge_weight is not None:
@@ -227,9 +229,12 @@ class GVAEModel(nn.Module):
         pos_scores, neg_scores = self.adj_decoder(z, edge_index, x.size(0))
         lib = data.library_size if hasattr(data, 'library_size') else x.sum(dim=1)
         expr_out = self.expr_decoder(z, lib)
+        attn_weights = None
+        if self.encoder_type == 'gat' and hasattr(self.encoder, 'gat1'):
+            attn_weights = self.encoder.gat1._alpha
         outputs = dict(z=z, mu=mu, logvar=logvar, pos_scores=pos_scores,
                        neg_scores=neg_scores, gate_values=gate_values,
-                       hybrid_weight=hybrid_weight)
+                       hybrid_weight=hybrid_weight, attention_weights=attn_weights)
         if self.decoder_type == 'gaussian':
             outputs['expr_mu'] = expr_out[0]
             outputs['expr_logvar'] = expr_out[1]

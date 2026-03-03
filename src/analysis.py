@@ -12,9 +12,11 @@ from sklearn.metrics import (
     roc_auc_score,
     average_precision_score,
     accuracy_score,
+    balanced_accuracy_score,
     precision_score,
     recall_score,
     f1_score,
+    adjusted_rand_score,
 )
 from sklearn.neighbors import NearestNeighbors
 
@@ -204,12 +206,17 @@ class PredictionAnalyzer:
             # Degenerate case: only one class present or invalid inputs.
             auroc = 0.5
             auprc = 0.0
+        tn = int(((y_bin == 0) & (y_true == 0)).sum())
+        fp = int(((y_bin == 1) & (y_true == 0)).sum())
+        specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
         return {
             'auroc': auroc,
             'auprc': auprc,
             'accuracy': accuracy_score(y_true, y_bin),
+            'balanced_accuracy': balanced_accuracy_score(y_true, y_bin),
             'precision': precision_score(y_true, y_bin, zero_division=0),
             'recall': recall_score(y_true, y_bin, zero_division=0),
+            'specificity': specificity,
             'f1': f1_score(y_true, y_bin, zero_division=0),
         }
 
@@ -243,6 +250,37 @@ class PredictionAnalyzer:
         }
 
     @staticmethod
+    def bootstrap_ci(y_true, y_pred, n_bootstrap=1000, alpha=0.05, seed=42):
+        rng = np.random.RandomState(seed)
+        n = len(y_true)
+        aurocs = np.zeros(n_bootstrap)
+        auprcs = np.zeros(n_bootstrap)
+        for i in range(n_bootstrap):
+            idx = rng.choice(n, n, replace=True)
+            y_t = y_true[idx]
+            y_p = y_pred[idx]
+            if len(np.unique(y_t)) < 2:
+                aurocs[i] = 0.5
+                auprcs[i] = 0.0
+                continue
+            try:
+                aurocs[i] = roc_auc_score(y_t, y_p)
+                auprcs[i] = average_precision_score(y_t, y_p)
+            except ValueError:
+                aurocs[i] = 0.5
+                auprcs[i] = 0.0
+        lo = alpha / 2
+        hi = 1.0 - alpha / 2
+        return {
+            'auroc_ci': (float(np.percentile(aurocs, lo * 100)),
+                         float(np.percentile(aurocs, hi * 100))),
+            'auprc_ci': (float(np.percentile(auprcs, lo * 100)),
+                         float(np.percentile(auprcs, hi * 100))),
+            'auroc_mean': float(np.mean(aurocs)),
+            'auprc_mean': float(np.mean(auprcs)),
+        }
+
+    @staticmethod
     def pooling_attention_map(attentions, coords):
         all_attns = torch.stack([a.cpu() for a in attentions]).numpy()
         mean_attn = all_attns.mean(axis=0)
@@ -253,21 +291,11 @@ class PredictionAnalyzer:
         }
 
 
-# ── Feature 3: Batch Mixing Metrics ────────────────────────────────────────
 
 class BatchMixingAnalyzer:
-    """kBET and batch entropy for evaluating latent space batch mixing."""
 
     @staticmethod
     def kbet(z, batch_labels, k=50, alpha=0.05, subsample=5000):
-        """k-nearest-neighbor Batch Effect Test.
-
-        For each cell, tests whether the batch composition of its k-NN
-        matches the global batch proportions via chi-squared test.
-
-        Returns:
-            dict with 'rejection_rate' (lower = better mixing) and 'mean_p_value'.
-        """
         n = len(z)
         k = min(k, n - 1)
         batch_labels = np.asarray(batch_labels)
@@ -314,10 +342,6 @@ class BatchMixingAnalyzer:
 
     @staticmethod
     def batch_entropy(z, batch_labels, k=50, subsample=5000):
-        """Normalized Shannon entropy of batch labels in k-NN neighborhoods.
-
-        Returns mean entropy in [0, 1] where 1 = perfectly mixed.
-        """
         n = len(z)
         k = min(k, n - 1)
         batch_labels = np.asarray(batch_labels)
@@ -351,17 +375,11 @@ class BatchMixingAnalyzer:
         return {'batch_entropy': float(np.mean(entropies)), 'n_batches': n_batches}
 
 
-# ── Feature 3: Cross-Dataset Concordance ────────────────────────────────────
 
 class CrossDatasetAnalyzer:
-    """Marker gene overlap (Jaccard) for cross-dataset concordance."""
 
     @staticmethod
     def marker_genes(z, labels, adata, n_markers=50):
-        """Identify marker genes per cluster using Wilcoxon rank-sum test.
-
-        Returns dict mapping cluster_id → list of marker gene names.
-        """
         ad = adata.copy()
         ad.obs['gvae_cluster'] = pd.Categorical(labels.astype(str))
         ad.obsm['X_latent'] = z
@@ -372,17 +390,22 @@ class CrossDatasetAnalyzer:
                                 n_genes=n_markers, use_raw=False)
         markers = {}
         for cl in unique_labels:
-            genes = ad.uns['rank_genes_groups']['names'][str(cl)][:n_markers]
-            markers[str(cl)] = list(genes)
+            names = ad.uns['rank_genes_groups']['names'][str(cl)]
+            pvals = ad.uns['rank_genes_groups']['pvals_adj'][str(cl)]
+            logfcs = ad.uns['rank_genes_groups']['logfoldchanges'][str(cl)]
+            filtered = []
+            for g, p, lfc in zip(names, pvals, logfcs):
+                if p < 0.01 and abs(lfc) > 1.0:
+                    filtered.append(g)
+                if len(filtered) >= n_markers:
+                    break
+            if len(filtered) < 5:
+                filtered = list(names[:n_markers])
+            markers[str(cl)] = filtered
         return markers
 
     @staticmethod
     def jaccard_concordance(markers_a, markers_b):
-        """Compute Jaccard similarity between two sets of cluster marker genes.
-
-        Matches clusters greedily by highest Jaccard overlap.
-        Returns per-pair scores and mean Jaccard.
-        """
         pairs = {}
         for cl_a, genes_a in markers_a.items():
             set_a = set(genes_a)
@@ -401,26 +424,132 @@ class CrossDatasetAnalyzer:
         return {'per_cluster': pairs, 'mean_jaccard': mean_jaccard}
 
 
-# ── Feature 5: Clinical Association Testing ─────────────────────────────────
+class BiologicalValidation:
+
+    @staticmethod
+    def morans_i(values, coords, k=15):
+        n = len(values)
+        if n < k + 1:
+            return {'morans_i': 0.0, 'expected_i': -1.0 / max(n - 1, 1), 'p_value': 1.0}
+
+        nbrs = NearestNeighbors(n_neighbors=min(k + 1, n), algorithm='auto')
+        nbrs.fit(coords)
+        _, indices = nbrs.kneighbors(coords)
+        indices = indices[:, 1:]
+
+        z = values - values.mean()
+        z_var = np.sum(z ** 2)
+        if z_var < 1e-10:
+            return {'morans_i': 0.0, 'expected_i': -1.0 / (n - 1), 'p_value': 1.0}
+
+        W = 0.0
+        lag_sum = 0.0
+        for i in range(n):
+            for j_idx in indices[i]:
+                W += 1.0
+                lag_sum += z[i] * z[j_idx]
+
+        I = (n / W) * (lag_sum / z_var)
+        expected_I = -1.0 / (n - 1)
+
+        in_degree = np.zeros(n, dtype=float)
+        for i in range(n):
+            for j_idx in indices[i]:
+                in_degree[j_idx] += 1.0
+        out_degree = np.full(n, indices.shape[1], dtype=float)
+        S2 = np.sum((out_degree + in_degree) ** 2)
+        S0 = W
+        S1 = 2.0 * W
+        n2 = n * n
+        EI2 = (n2 * S1 - n * S2 + 3 * S0 * S0) / (S0 * S0 * (n2 - 1))
+        var_I = EI2 - expected_I ** 2
+        if var_I <= 0:
+            return {'morans_i': float(I), 'expected_i': float(expected_I), 'p_value': 1.0}
+
+        from scipy.stats import norm
+        z_score = (I - expected_I) / np.sqrt(var_I)
+        p_value = 2.0 * (1.0 - norm.cdf(abs(z_score)))
+        return {
+            'morans_i': float(I),
+            'expected_i': float(expected_I),
+            'z_score': float(z_score),
+            'p_value': float(p_value),
+        }
+
+    @staticmethod
+    def ari_stability(z, n_runs=20, resolution=1.0):
+        if not _HAS_LEIDEN:
+            return {'mean_ari': 0.0, 'std_ari': 0.0, 'note': 'leidenalg not installed'}
+
+        all_labels = []
+        for run in range(n_runs):
+            ad = anndata.AnnData(X=z)
+            ad.obsm['X_latent'] = z
+            n_neighbors = min(15, z.shape[0] - 1)
+            sc.pp.neighbors(ad, use_rep='X_latent', n_neighbors=n_neighbors,
+                            random_state=run)
+            sc.tl.leiden(ad, resolution=resolution, random_state=run)
+            all_labels.append(ad.obs['leiden'].astype(int).values)
+
+        aris = []
+        for i in range(n_runs):
+            for j in range(i + 1, n_runs):
+                aris.append(adjusted_rand_score(all_labels[i], all_labels[j]))
+        return {
+            'mean_ari': float(np.mean(aris)),
+            'std_ari': float(np.std(aris)),
+            'n_runs': n_runs,
+        }
+
+    @staticmethod
+    def gsea_enrichment(marker_genes_dict, gene_sets='MSigDB_Hallmark_2020', organism='Human'):
+        try:
+            import gseapy as gp
+        except ImportError:
+            return {'note': 'gseapy not installed. Install via: pip install gseapy'}
+
+        results = {}
+        for cluster_id, genes in marker_genes_dict.items():
+            if not genes:
+                continue
+            try:
+                enr = gp.enrichr(
+                    gene_list=genes,
+                    gene_sets=gene_sets,
+                    organism=organism,
+                    outdir=None,
+                    no_plot=True,
+                )
+                top = enr.results.head(10)[['Term', 'Adjusted P-value', 'Combined Score']]
+                results[cluster_id] = top.to_dict('records')
+            except Exception as e:
+                results[cluster_id] = {'error': str(e)}
+        return results
+
+    @staticmethod
+    def spatial_permutation_test(gate_values, coords, n_permutations=1000, k=15, seed=42):
+        observed = BiologicalValidation.morans_i(gate_values, coords, k=k)
+        rng = np.random.RandomState(seed)
+        null_Is = np.zeros(n_permutations)
+        for i in range(n_permutations):
+            perm_vals = rng.permutation(gate_values)
+            null_result = BiologicalValidation.morans_i(perm_vals, coords, k=k)
+            null_Is[i] = null_result['morans_i']
+        p_value = float(np.mean(null_Is >= observed['morans_i']))
+        return {
+            'observed_I': observed['morans_i'],
+            'null_mean': float(np.mean(null_Is)),
+            'null_std': float(np.std(null_Is)),
+            'p_value': p_value,
+            'n_permutations': n_permutations,
+        }
+
+
 
 class ClinicalAssociationTest:
-    """Test clinical relevance of GVAE-discovered rare cell states (Section 3.6).
-
-    Associates abundance of each rare subpopulation with immunotherapy response
-    via logistic regression, adjusting for therapy type.
-    """
 
     @staticmethod
     def compute_rare_fractions(rare_labels, patient_masks):
-        """Per-patient fraction of each rare subpopulation.
-
-        Args:
-            rare_labels: array of cluster labels (-1=normal, 100+=rare)
-            patient_masks: list of boolean tensors, one per patient
-
-        Returns:
-            DataFrame of shape (n_patients, n_rare_clusters)
-        """
         rare_clusters = sorted(set(rare_labels[rare_labels >= 100]))
         if len(rare_clusters) == 0:
             return pd.DataFrame()
@@ -438,10 +567,6 @@ class ClinicalAssociationTest:
 
     @staticmethod
     def test_association(fractions_df, response, therapy=None, alpha=0.05):
-        """Logistic regression: response ~ rare_fractions [+ therapy].
-
-        Returns per-feature coefficients, p-values, and BH-corrected q-values.
-        """
         if fractions_df.empty:
             return {'features': [], 'note': 'No rare subpopulations detected'}
 
@@ -505,7 +630,6 @@ class ClinicalAssociationTest:
 
     @staticmethod
     def summary(results):
-        """Print summary of clinical association results."""
         if not results.get('features'):
             print(f"  Clinical association: {results.get('note', 'no results')}")
             return

@@ -60,7 +60,34 @@ DOWNLOADS = {
             "  Place downloaded files in: data/raw/nsclc/"
         ),
     },
+    "nsclc_ici": {
+        "source": "GEO",
+        "accession": "GSE243013",
+        "description": "Deng et al. 2025 -- NSCLC anti-PD-1 + chemo, 243 patients, MPR/non-MPR labels",
+        "files": {
+            "raw_tar": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_RAW.tar",
+            "metadata": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_metadata.csv.gz",
+        },
+        "note": "Large download. Contains scRNA-seq from 243 NSCLC patients with immunotherapy response.",
+    },
 }
+
+
+def _run_scrublet(adata):
+    """Run Scrublet doublet detection and remove predicted doublets."""
+    try:
+        import scrublet as scr
+        scrub = scr.Scrublet(adata.X)
+        doublet_scores, predicted_doublets = scrub.scrub_doublets(verbose=False)
+        adata.obs['doublet_score'] = doublet_scores
+        adata.obs['predicted_doublet'] = predicted_doublets
+        n_doublets = int(predicted_doublets.sum())
+        adata = adata[~adata.obs['predicted_doublet']].copy()
+        print(f"  Scrublet: removed {n_doublets} doublets ({adata.n_obs} cells remaining)")
+        return adata
+    except ImportError:
+        print("  [warn] scrublet not installed, skipping doublet removal")
+        return adata
 
 
 def run_curl(url, output_path, description=""):
@@ -256,9 +283,20 @@ def process_melanoma():
 
     print("  Running QC and preprocessing...")
     sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_cells(adata, max_genes=6000)
     sc.pp.filter_genes(adata, min_cells=3)
+
+    adata.var["mt"] = adata.var_names.str.startswith("MT-")
+    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+    adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
+    print(f"  After MT% filter: {adata.n_obs} cells")
+
+    adata = _run_scrublet(adata)
+
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
+
     n_top = min(2000, adata.n_vars)
     sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
@@ -315,14 +353,18 @@ def process_breast():
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_cells(adata, max_genes=6000)
     sc.pp.filter_genes(adata, min_cells=3)
     adata.var["mt"] = adata.var_names.str.startswith("MT-")
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
     adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
     print(f"  After QC: {adata.n_obs} cells x {adata.n_vars} genes")
 
+    adata = _run_scrublet(adata)
+
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
     sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
@@ -381,18 +423,48 @@ def process_colorectal():
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=50)
+    sc.pp.filter_cells(adata, max_genes=6000)
     sc.pp.filter_genes(adata, min_cells=3)
+    adata.var["mt"] = adata.var_names.str.startswith("MT-")
+    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+    adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
     print(f"  After QC: {adata.n_obs} spots x {adata.n_vars} genes")
+
+    adata = _run_scrublet(adata)
 
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
     sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
-    coords = np.random.randn(adata.n_obs, 2).astype(np.float32) * 100
-    adata.obsm["spatial"] = coords
+    has_spatial = False
+    for pos_file in ['tissue_positions.csv', 'tissue_positions_list.csv']:
+        pos_path = raw_dir / pos_file
+        if pos_path.exists():
+            import pandas as pd
+            pos_df = pd.read_csv(pos_path, header=None)
+            if pos_df.shape[1] >= 6:
+                barcode_to_pos = dict(zip(pos_df[0], zip(pos_df[4], pos_df[5])))
+                coords = np.zeros((adata.n_obs, 2), dtype=np.float32)
+                matched = 0
+                for idx, bc in enumerate(adata.obs_names):
+                    if bc in barcode_to_pos:
+                        coords[idx] = barcode_to_pos[bc]
+                        matched += 1
+                if matched > adata.n_obs * 0.5:
+                    adata.obsm["spatial"] = coords
+                    has_spatial = True
+                    print(f"  Loaded spatial coords for {matched}/{adata.n_obs} spots")
+            break
+
+    if not has_spatial:
+        sc.pp.neighbors(adata, n_neighbors=15)
+        sc.tl.umap(adata)
+        adata.obsm["spatial"] = adata.obsm["X_umap"].astype(np.float32) * 100
+        print("  [warn] No tissue_positions file found; using UMAP layout as spatial proxy")
 
     out_path = PROCESSED_DIR / "colorectal.h5ad"
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
@@ -507,6 +579,125 @@ def process_nsclc():
         f.close()
 
 
+def download_nsclc_ici():
+    print("\n=== NSCLC ICI (GSE243013) ===")
+    print("  Deng et al. 2025 -- 243 patients, anti-PD-1 + chemo, MPR/non-MPR")
+    out_dir = RAW_DIR / "nsclc_ici"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    info = DOWNLOADS["nsclc_ici"]
+    for key, url in info["files"].items():
+        fname = url.split("/")[-1]
+        fpath = out_dir / fname
+        if run_curl(url, fpath, key):
+            if fname.endswith(".gz"):
+                decompress_gz(fpath)
+
+
+def process_nsclc_ici():
+    print("\n=== Processing NSCLC ICI (GSE243013) into h5ad ===")
+    raw_dir = RAW_DIR / "nsclc_ici"
+
+    try:
+        import scanpy as sc
+        import anndata
+        import numpy as np
+        import pandas as pd
+        import warnings
+        warnings.filterwarnings("ignore")
+    except ImportError as e:
+        print(f"  [error] Missing dependency: {e}")
+        return
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    meta_path = raw_dir / "GSE243013_metadata.csv"
+    if not meta_path.exists():
+        meta_gz = raw_dir / "GSE243013_metadata.csv.gz"
+        if meta_gz.exists():
+            decompress_gz(meta_gz, meta_path)
+        else:
+            print("  [skip] Metadata not found. Run download first.")
+            return
+
+    print("  Reading metadata...")
+    meta = pd.read_csv(meta_path)
+    print(f"  {len(meta)} cells in metadata")
+
+    h5_files = sorted([f for f in os.listdir(raw_dir) if f.endswith(".h5")])
+    mtx_dirs = sorted([f for f in os.listdir(raw_dir)
+                       if (raw_dir / f / "matrix.mtx.gz").exists() or
+                          (raw_dir / f / "matrix.mtx").exists()])
+
+    adatas = []
+    if h5_files:
+        for fname in h5_files:
+            path = raw_dir / fname
+            print(f"  Reading {fname}...")
+            ad = sc.read_10x_h5(str(path))
+            ad.var_names_make_unique()
+            adatas.append(ad)
+    elif mtx_dirs:
+        for dname in mtx_dirs:
+            path = raw_dir / dname
+            print(f"  Reading {dname}/...")
+            ad = sc.read_10x_mtx(str(path), var_names="gene_symbols", cache=False)
+            adatas.append(ad)
+
+    if not adatas:
+        print("  [skip] No expression files found. Download RAW tar and extract first.")
+        return
+
+    print(f"  Concatenating {len(adatas)} samples...")
+    adata = anndata.concat(adatas, join="outer", fill_value=0)
+    adata.var_names_make_unique()
+    print(f"  Combined: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    if 'cell_barcode' in meta.columns:
+        common = adata.obs_names.intersection(meta['cell_barcode'])
+        if len(common) > 0:
+            meta_indexed = meta.set_index('cell_barcode')
+            for col in ['patient_id', 'response', 'therapy']:
+                if col in meta_indexed.columns:
+                    adata.obs[col] = meta_indexed.reindex(adata.obs_names)[col]
+
+    if 'response' not in adata.obs.columns:
+        resp_col = [c for c in meta.columns if 'response' in c.lower() or 'mpr' in c.lower()]
+        if resp_col:
+            print(f"  Found response column: {resp_col[0]}")
+
+    print("  QC filtering...")
+    sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_cells(adata, max_genes=6000)
+    sc.pp.filter_genes(adata, min_cells=3)
+    adata.var["mt"] = adata.var_names.str.startswith("MT-")
+    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+    adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
+    print(f"  After QC: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    adata = _run_scrublet(adata)
+
+    sc.pp.normalize_total(adata, target_sum=10000)
+    sc.pp.log1p(adata)
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
+    n_top = min(2000, adata.n_vars)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+    sc.pp.pca(adata, n_comps=n_comps)
+
+    coords = np.random.randn(adata.n_obs, 2).astype(np.float32) * 100
+    adata.obsm["spatial"] = coords
+
+    out_path = PROCESSED_DIR / "nsclc_ici.h5ad"
+    adata.write(out_path)
+    print(f"  Saved: {out_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
+    if 'patient_id' in adata.obs.columns:
+        n_patients = adata.obs['patient_id'].nunique()
+        print(f"  {n_patients} patients")
+    if 'response' in adata.obs.columns:
+        print(f"  Response: {dict(adata.obs['response'].value_counts())}")
+
+
 def main():
     import argparse
 
@@ -515,16 +706,16 @@ def main():
         "datasets",
         nargs="*",
         default=["all"],
-        choices=["all", "melanoma", "breast", "colorectal", "nsclc",
+        choices=["all", "melanoma", "breast", "colorectal", "nsclc", "nsclc_ici",
                  "process", "process-melanoma", "process-breast",
-                 "process-colorectal", "process-nsclc"],
+                 "process-colorectal", "process-nsclc", "process-nsclc_ici"],
         help="Which datasets to download or process",
     )
     args = parser.parse_args()
 
     targets = args.datasets
     if "all" in targets:
-        targets = ["melanoma", "breast", "colorectal", "nsclc"]
+        targets = ["melanoma", "breast", "colorectal", "nsclc", "nsclc_ici"]
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -537,11 +728,14 @@ def main():
             download_colorectal()
         elif t == "nsclc":
             download_nsclc()
+        elif t == "nsclc_ici":
+            download_nsclc_ici()
         elif t == "process":
             process_melanoma()
             process_breast()
             process_colorectal()
             process_nsclc()
+            process_nsclc_ici()
         elif t == "process-melanoma":
             process_melanoma()
         elif t == "process-breast":
@@ -550,9 +744,11 @@ def main():
             process_colorectal()
         elif t == "process-nsclc":
             process_nsclc()
+        elif t == "process-nsclc_ici":
+            process_nsclc_ici()
 
     print("\n=== Summary ===")
-    for name in ["melanoma", "breast", "colorectal", "nsclc"]:
+    for name in ["melanoma", "breast", "colorectal", "nsclc", "nsclc_ici"]:
         d = RAW_DIR / name
         if d.exists():
             n_files = len(list(d.iterdir()))

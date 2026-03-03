@@ -13,7 +13,8 @@ from sklearn.metrics import roc_auc_score
 from src.model import GVAEModel
 from src.trainer import Trainer
 from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer,
-                          BatchMixingAnalyzer, ClinicalAssociationTest)
+                          BatchMixingAnalyzer, ClinicalAssociationTest,
+                          BiologicalValidation)
 from src.data_utils import prepare_graph_data, create_synthetic_data
 from src.config import CONFIGS
 from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
@@ -24,6 +25,7 @@ DATASETS = {
     'colorectal': {'path': 'data/processed/colorectal.h5ad', 'has_spatial': True, 'r_spatial': 24.0},
     'nsclc_scrna': {'path': 'data/processed/nsclc_scrna.h5ad', 'has_spatial': False},
     'nsclc_visium': {'path': 'data/processed/nsclc_visium.h5ad', 'has_spatial': True, 'r_spatial': 24.0},
+    'nsclc_ici': {'path': 'data/processed/nsclc_ici.h5ad', 'has_spatial': False},
 }
 
 def load_real_data(dataset_name, n_hvg=2000, max_cells=None):
@@ -100,7 +102,6 @@ def assign_patient_splits(data, train_pids, val_pids, test_pids, unique_pids):
     data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in test_pids], dtype=torch.long)
 
 def run_downstream(model, data, config, adata, output_dir, ablation=None):
-    """Shared downstream analysis: clustering, rare cells, metrics, clinical association."""
     model.eval()
     data_eval = data.to(config['device'])
     with torch.no_grad():
@@ -110,11 +111,9 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         logvar = outputs['logvar'].cpu().numpy()
         gate_vals = outputs['gate_values'].cpu().numpy()
 
-    # Rare cell detection
     rare_method = config.get('_rare_method', 'kl')
     detector = RareCellDetector(threshold=2.0)
     if rare_method == 'leiden':
-        # Ablation 4: Leiden-only (no KL filtering)
         print("  [ablation] Using Leiden-only rare cell detection")
         scores = np.zeros(len(z))
         is_rare = np.ones(len(z), dtype=bool)  # all cells go through Leiden
@@ -126,13 +125,24 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
             rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
     print(f"Rare cells: {is_rare.sum()} / {len(is_rare)}")
 
-    # Clustering
     clusterer = ClusteringAnalyzer()
-    labels, confidence = clusterer.cluster(z, logvar=logvar, resolution=1.0)
+    best_res, best_sil = clusterer.select_resolution(z, logvar=logvar)
+    labels, confidence = clusterer.cluster(z, logvar=logvar, resolution=best_res)
     eval_metrics = clusterer.evaluate(z, labels)
-    print(f"Clusters: {eval_metrics['n_clusters']}, Silhouette: {eval_metrics['silhouette']:.4f}")
+    eval_metrics['resolution'] = best_res
+    print(f"Clusters: {eval_metrics['n_clusters']}, Silhouette: {eval_metrics['silhouette']:.4f}, Resolution: {best_res}")
 
-    # Batch mixing (kBET) if patient_id available
+    ari_result = BiologicalValidation.ari_stability(z, resolution=best_res)
+    eval_metrics['ari_stability'] = ari_result
+    print(f"ARI stability: {ari_result.get('mean_ari', 0):.3f} +/- {ari_result.get('std_ari', 0):.3f}")
+
+    spatial_metrics = {}
+    coords = data_eval.coords.cpu().numpy()
+    if coords.std() > 1.0:
+        spatial_metrics = BiologicalValidation.morans_i(gate_vals, coords)
+        print(f"Moran's I (gate): {spatial_metrics.get('morans_i', 0):.3f}, "
+              f"p={spatial_metrics.get('p_value', 1):.4f}")
+
     batch_metrics = {}
     if 'patient_id' in adata.obs.columns:
         batch_labels = adata.obs['patient_id'].values
@@ -142,7 +152,6 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         print(f"kBET rejection: {kbet_result['rejection_rate']:.3f}, "
               f"Batch entropy: {entropy_result['batch_entropy']:.3f}")
 
-    # Prediction metrics
     pred_metrics = {}
     if 'y_pred' in outputs and hasattr(data_eval, 'y'):
         y_all = data_eval.y.cpu().numpy()
@@ -152,14 +161,12 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
             pred_metrics = PredictionAnalyzer.compute_metrics(y_all[test_idx], y_pred_all[test_idx])
             print(f"Test AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f} (n={len(test_idx)})")
 
-    # LogReg baseline (ablation 5)
     logreg_results = {}
     if config.get('_prediction_method') == 'logreg' and hasattr(data_eval, 'y'):
         y = data_eval.y.cpu().numpy()
         logreg_results = LogisticRegressionBaseline.run(
             z, labels, data_eval.patient_masks, y)
 
-    # Clinical association testing
     clinical_results = {}
     if ('response' in adata.obs.columns and 'patient_id' in adata.obs.columns
             and hasattr(data_eval, 'y')):
@@ -175,7 +182,6 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
 
     print(f"\nGate: mean={gate_vals.mean():.3f}, std={gate_vals.std():.3f}")
 
-    # Save outputs
     np.save(output_dir / 'embeddings.npy', z)
     np.save(output_dir / 'rare_cell_scores.npy', scores)
     np.save(output_dir / 'cluster_labels.npy', labels)
@@ -192,6 +198,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         'batch_mixing': batch_metrics,
         'rare_cells': {'n_rare': int(is_rare.sum()), 'threshold': 2.0,
                        'method': rare_method},
+        'spatial_validation': spatial_metrics,
         'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
         'logreg_baseline': logreg_results,
         'clinical_association': clinical_results,
@@ -218,7 +225,6 @@ def run_single(args, config):
         graph_kwargs = {'r_spatial': info.get('r_spatial', 82.5)}
     print(f"  {adata.n_obs} cells, {adata.n_vars} genes")
 
-    # Auto-detect mini-batch need
     if adata.n_obs > 50_000 and config.get('batch_size') is None:
         config['batch_size'] = 512
         print(f"  [auto] Enabled mini-batch training (batch_size=512) for {adata.n_obs} cells")
@@ -281,7 +287,6 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
     n_resp = patient_responses.sum()
     print(f"  {n_patients} patients ({int(n_resp)} responders, {int(n_patients - n_resp)} non-responders)")
 
-    # Auto-detect mini-batch
     if adata.n_obs > 50_000 and config.get('batch_size') is None:
         config['batch_size'] = 512
         print(f"  [auto] Enabled mini-batch training (batch_size=512) for {adata.n_obs} cells")
@@ -367,7 +372,10 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
     print(f"\n  Pooled AUROC: {pooled_metrics['auroc']:.3f}")
     print(f"  Pooled AUPRC: {pooled_metrics['auprc']:.3f}")
 
-    # Permutation test
+    bootstrap = PredictionAnalyzer.bootstrap_ci(all_y_true, all_y_pred, n_bootstrap=1000)
+    print(f"  AUROC 95% CI: [{bootstrap['auroc_ci'][0]:.3f}, {bootstrap['auroc_ci'][1]:.3f}]")
+    print(f"  AUPRC 95% CI: [{bootstrap['auprc_ci'][0]:.3f}, {bootstrap['auprc_ci'][1]:.3f}]")
+
     print(f"\nPermutation test ({n_permutations} permutations)...")
     rng = np.random.RandomState(42)
     null_aurocs = np.zeros(n_permutations)
@@ -390,6 +398,7 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list))},
         'cv_metrics': cv_metrics,
         'pooled_metrics': pooled_metrics,
+        'bootstrap_ci': bootstrap,
         'permutation_test': {
             'p_value': p_value,
             'observed_auroc': pooled_metrics['auroc'],
@@ -420,11 +429,9 @@ def main():
 
     config = CONFIGS[args.config].copy()
 
-    # Apply ablation overrides
     if args.ablation:
         config = apply_ablation(config, args.ablation)
 
-    # CLI batch-size override
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
 

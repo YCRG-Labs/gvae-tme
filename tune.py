@@ -1,12 +1,3 @@
-"""Bayesian hyperparameter optimization via Optuna (Appendix A of paper).
-
-TPE sampler, 50 trials per dataset (10 random + 40 guided), 100 epochs each
-with patience 20. Top-3 configs retrained at full budget.
-
-Usage:
-    python tune.py --data melanoma --config full --n-trials 50
-    python tune.py --data synthetic --config local --n-trials 3  # smoke test
-"""
 import sys
 import argparse
 import json
@@ -24,14 +15,13 @@ except ImportError:
     sys.exit(1)
 
 from src.model import GVAEModel
-from src.trainer import Trainer
+from src.trainer import Trainer, GVAELoss
 from src.data_utils import prepare_graph_data, create_synthetic_data
 from src.config import CONFIGS
 from train import load_real_data, DATASETS, make_serializable
 
 
 def build_trial_config(trial, base_config):
-    """Sample hyperparameters for a single Optuna trial."""
     config = base_config.copy()
     config['latent_dim'] = trial.suggest_categorical('latent_dim', [16, 32, 64])
     config['n_heads'] = trial.suggest_categorical('n_heads', [1, 2, 4, 8])
@@ -40,24 +30,31 @@ def build_trial_config(trial, base_config):
     config['beta'] = trial.suggest_categorical('beta', [0.001, 0.01, 0.1])
     config['gamma'] = trial.suggest_categorical('gamma', [0.01, 0.05, 0.1, 0.5])
     config['n_neg_samples'] = trial.suggest_categorical('n_neg_samples', [5, 10, 20])
-    # Hidden dim must be divisible by n_heads
+    config['temperature'] = trial.suggest_categorical('temperature', [0.05, 0.1, 0.2, 0.5])
+    config['rare_threshold'] = trial.suggest_categorical('rare_threshold', [1.5, 2.0, 2.5, 3.0])
+    config['k_mol'] = trial.suggest_categorical('k_mol', [10, 15, 20, 30])
     config['hidden_dim'] = config['n_heads'] * (config['latent_dim'] // config['n_heads'] or 1)
     config['hidden_dim'] = max(config['hidden_dim'], config['n_heads'] * 4)
-    # Reduced budget for trials
+
     config['epochs_phase1'] = 100
     config['epochs_phase2'] = 0
     config['patience'] = 20
     return config
 
 
-def objective(trial, base_config, data, device):
-    """Optuna objective: validation reconstruction loss after Phase 1."""
+def objective(trial, base_config, data, device, adata=None, has_spatial=True, graph_kwargs=None):
     config = build_trial_config(trial, base_config)
     config['device'] = device
 
+    trial_data = data
+    k_mol = config.get('k_mol', 15)
+    if k_mol != 15 and adata is not None:
+        trial_data = prepare_graph_data(
+            adata, has_spatial=has_spatial, k_mol=k_mol, **(graph_kwargs or {}))
+
     model = GVAEModel(
-        n_features=data.x.size(1),
-        n_genes=data.x_raw.size(1),
+        n_features=trial_data.x.size(1),
+        n_genes=trial_data.x_raw.size(1),
         hidden_dim=config['hidden_dim'],
         latent_dim=config['latent_dim'],
         n_heads=config['n_heads'],
@@ -68,21 +65,34 @@ def objective(trial, base_config, data, device):
     trainer = Trainer(model, config, device=device)
 
     try:
-        trainer.train(data)
+        trainer.train(trial_data)
     except RuntimeError as e:
         if 'out of memory' in str(e).lower():
             torch.cuda.empty_cache()
             return float('inf')
         raise
 
-    val = trainer.evaluate(data.to(device))
+    val = trainer.evaluate(trial_data.to(device))
+    model.eval()
+    with torch.no_grad():
+        data_dev = trial_data.to(device)
+        outputs = model(data_dev)
+        loss_fn = GVAELoss()
+        L_kl = loss_fn.kl_divergence(outputs['mu'], outputs['logvar']).item()
+        L_contrast = 0.0
+        if hasattr(data_dev, 'pos_pairs') and hasattr(data_dev, 'neg_pairs'):
+            if data_dev.pos_pairs.size(0) > 0 and data_dev.neg_pairs.size(0) > 0:
+                L_contrast = loss_fn.contrastive(
+                    outputs['z'], data_dev.pos_pairs, data_dev.neg_pairs).item()
     val_loss = (val['loss_adj'] +
-                config['lambda1'] * val['loss_expr'])
+                config['lambda1'] * val['loss_expr'] +
+                config['lambda2'] * L_contrast +
+                config['beta'] * L_kl)
     return val_loss
 
 
-def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3):
-    """Retrain top-k configs at full epoch budget."""
+def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3,
+                  adata=None, has_spatial=True, graph_kwargs=None):
     results = []
     full_epochs = base_config.get('epochs_phase1', 300)
 
@@ -96,12 +106,18 @@ def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3):
         config['patience'] = base_config.get('patience', 50)
         config['device'] = device
 
+        trial_data = data
+        k_mol = config.get('k_mol', 15)
+        if k_mol != 15 and adata is not None:
+            trial_data = prepare_graph_data(
+                adata, has_spatial=has_spatial, k_mol=k_mol, **(graph_kwargs or {}))
+
         retrain_dir = output_dir / f'retrain_{i}'
         retrain_dir.mkdir(exist_ok=True)
 
         model = GVAEModel(
-            n_features=data.x.size(1),
-            n_genes=data.x_raw.size(1),
+            n_features=trial_data.x.size(1),
+            n_genes=trial_data.x_raw.size(1),
             hidden_dim=config['hidden_dim'],
             latent_dim=config['latent_dim'],
             n_heads=config['n_heads'],
@@ -110,8 +126,8 @@ def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3):
             use_predictor=False,
         )
         trainer = Trainer(model, config, device=device, checkpoint_dir=retrain_dir)
-        phase1 = trainer.train(data)
-        val = trainer.evaluate(data.to(device))
+        phase1 = trainer.train(trial_data)
+        val = trainer.evaluate(trial_data.to(device))
         val_loss = val['loss_adj'] + config['lambda1'] * val['loss_expr']
 
         results.append({
@@ -146,7 +162,6 @@ def main():
 
     print(f"Optuna HPO | Data: {args.data} | Trials: {args.n_trials} | Device: {device}")
 
-    # Load data
     if args.data == 'synthetic':
         adata = create_synthetic_data(
             base_config['n_cells'], base_config['n_genes'],
@@ -165,7 +180,6 @@ def main():
     data = prepare_graph_data(adata, has_spatial=has_spatial, **graph_kwargs)
     print(f"  {data.edge_index.size(1)} edges")
 
-    # Create study: 10 random startup trials + guided
     sampler = optuna.samplers.TPESampler(
         seed=args.seed,
         n_startup_trials=min(10, args.n_trials),
@@ -173,30 +187,29 @@ def main():
     study = optuna.create_study(direction='minimize', sampler=sampler)
 
     def _objective(trial):
-        return objective(trial, base_config, data, device)
+        return objective(trial, base_config, data, device,
+                         adata=adata, has_spatial=has_spatial, graph_kwargs=graph_kwargs)
 
     print(f"\nRunning {args.n_trials} trials...")
     study.optimize(_objective, n_trials=args.n_trials, show_progress_bar=True)
 
-    # Collect results
     print(f"\n{'='*50}")
     print("Optimization Complete")
     print(f"{'='*50}")
     print(f"  Best val_loss: {study.best_value:.4f}")
     print(f"  Best params: {study.best_params}")
 
-    # Extract top-k trial configs
     sorted_trials = sorted(study.trials, key=lambda t: t.value if t.value is not None else float('inf'))
     top_configs = []
     for t in sorted_trials[:args.n_retrain]:
         config = build_trial_config(t, base_config)
         top_configs.append((config, t.value))
 
-    # Retrain top configs at full budget
     retrain_results = retrain_top_k(top_configs, data, base_config, device,
-                                     output_dir, k=args.n_retrain)
+                                     output_dir, k=args.n_retrain,
+                                     adata=adata, has_spatial=has_spatial,
+                                     graph_kwargs=graph_kwargs)
 
-    # Save study results
     all_trials = []
     for t in study.trials:
         all_trials.append({

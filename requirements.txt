@@ -12,5 +12,8 @@ seaborn>=0.12
 statsmodels>=0.14
 optuna>=3.0
 pytest>=7.0
+scrublet>=0.2.3
 # Optional: annoy for fast KNN on >100K cells
 # annoy>=1.17
+# Optional: gseapy for GSEA pathway enrichment
+# gseapy>=1.0
