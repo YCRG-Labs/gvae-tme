@@ -7,8 +7,8 @@ Graph Variational Autoencoder for Tumor Microenvironment Analysis. Learns spatia
 ```bash
 pip install -r requirements.txt
 
-python train.py --config local   # CPU/MPS sanity check (500 cells, ~30s)
-python train.py --config full    # Full run (5K cells, use GPU)
+python train.py --config local   
+python train.py --config full  
 ```
 
 Outputs saved to `outputs/`.
