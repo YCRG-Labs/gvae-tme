@@ -28,6 +28,14 @@ LOCAL = {
     'patience': 20,
     'max_grad_norm': 1.0,
     'device': get_device(),
+    # Ablation defaults
+    'encoder_type': 'gat',
+    'decoder_type': 'zinb',
+    'gate_mode': 'learned',
+    'freeze_encoder': False,
+    # Mini-batch training (None = full-batch)
+    'batch_size': None,
+    'num_neighbors': [15, 10],
 }
 
 FULL = {
@@ -51,6 +59,14 @@ FULL = {
     'patience': 50,
     'max_grad_norm': 1.0,
     'device': get_device(),
+    # Ablation defaults
+    'encoder_type': 'gat',
+    'decoder_type': 'zinb',
+    'gate_mode': 'learned',
+    'freeze_encoder': False,
+    # Mini-batch training (None = full-batch)
+    'batch_size': None,
+    'num_neighbors': [15, 10],
 }
 
 CONFIGS = {'local': LOCAL, 'full': FULL}

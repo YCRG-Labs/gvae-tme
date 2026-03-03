@@ -12,9 +12,11 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 from src.model import GVAEModel
 from src.trainer import Trainer
-from src.analysis import RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer
+from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer,
+                          BatchMixingAnalyzer, ClinicalAssociationTest)
 from src.data_utils import prepare_graph_data, create_synthetic_data
 from src.config import CONFIGS
+from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
 
 DATASETS = {
     'melanoma': {'path': 'data/processed/melanoma.h5ad', 'has_spatial': False},
@@ -65,7 +67,31 @@ def build_model(config, data, use_predictor):
         dropout=config['dropout'],
         n_neg_samples=config['n_neg_samples'],
         use_predictor=use_predictor,
+        encoder_type=config.get('encoder_type', 'gat'),
+        decoder_type=config.get('decoder_type', 'zinb'),
+        gate_mode=config.get('gate_mode', 'learned'),
     )
+
+def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=None):
+    """Create appropriate trainer (full-batch or mini-batch)."""
+    batch_size = config.get('batch_size')
+    if batch_size is not None:
+        try:
+            from src.minibatch import MiniBatchTrainer, check_neighbor_loader
+            # Runtime check: NeighborLoader needs pyg-lib or torch-sparse
+            if data is not None:
+                check_neighbor_loader(data, config.get('num_neighbors', [15, 10]))
+            return MiniBatchTrainer(model, config, device=device,
+                                    checkpoint_dir=output_dir,
+                                    freeze_encoder=freeze_encoder)
+        except (ImportError, Exception) as e:
+            print(f"  [warn] Mini-batch unavailable: {e}")
+            print(f"  Install pyg-lib or torch-sparse for NeighborLoader support.")
+            print(f"  Falling back to full-batch training.")
+            config['batch_size'] = None
+    return Trainer(model, config, device=device,
+                   checkpoint_dir=output_dir,
+                   freeze_encoder=freeze_encoder)
 
 def assign_patient_splits(data, train_pids, val_pids, test_pids, unique_pids):
     pid_to_idx = {pid: i for i, pid in enumerate(unique_pids)}
@@ -73,8 +99,109 @@ def assign_patient_splits(data, train_pids, val_pids, test_pids, unique_pids):
     data.val_patient_idx = torch.tensor([pid_to_idx[p] for p in val_pids], dtype=torch.long)
     data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in test_pids], dtype=torch.long)
 
+def run_downstream(model, data, config, adata, output_dir, ablation=None):
+    """Shared downstream analysis: clustering, rare cells, metrics, clinical association."""
+    model.eval()
+    data_eval = data.to(config['device'])
+    with torch.no_grad():
+        outputs = model(data_eval)
+        z = outputs['z'].cpu().numpy()
+        mu = outputs['mu'].cpu().numpy()
+        logvar = outputs['logvar'].cpu().numpy()
+        gate_vals = outputs['gate_values'].cpu().numpy()
+
+    # Rare cell detection
+    rare_method = config.get('_rare_method', 'kl')
+    detector = RareCellDetector(threshold=2.0)
+    if rare_method == 'leiden':
+        # Ablation 4: Leiden-only (no KL filtering)
+        print("  [ablation] Using Leiden-only rare cell detection")
+        scores = np.zeros(len(z))
+        is_rare = np.ones(len(z), dtype=bool)  # all cells go through Leiden
+        rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
+    else:
+        scores, is_rare = detector.detect(mu, logvar)
+        rare_labels = np.full(len(z), -1, dtype=int)
+        if is_rare.sum() > 10:
+            rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
+    print(f"Rare cells: {is_rare.sum()} / {len(is_rare)}")
+
+    # Clustering
+    clusterer = ClusteringAnalyzer()
+    labels, confidence = clusterer.cluster(z, logvar=logvar, resolution=1.0)
+    eval_metrics = clusterer.evaluate(z, labels)
+    print(f"Clusters: {eval_metrics['n_clusters']}, Silhouette: {eval_metrics['silhouette']:.4f}")
+
+    # Batch mixing (kBET) if patient_id available
+    batch_metrics = {}
+    if 'patient_id' in adata.obs.columns:
+        batch_labels = adata.obs['patient_id'].values
+        kbet_result = BatchMixingAnalyzer.kbet(z, batch_labels, k=min(50, len(z) - 1))
+        entropy_result = BatchMixingAnalyzer.batch_entropy(z, batch_labels, k=min(50, len(z) - 1))
+        batch_metrics = {**kbet_result, **entropy_result}
+        print(f"kBET rejection: {kbet_result['rejection_rate']:.3f}, "
+              f"Batch entropy: {entropy_result['batch_entropy']:.3f}")
+
+    # Prediction metrics
+    pred_metrics = {}
+    if 'y_pred' in outputs and hasattr(data_eval, 'y'):
+        y_all = data_eval.y.cpu().numpy()
+        y_pred_all = outputs['y_pred'].detach().cpu().numpy()
+        if hasattr(data_eval, 'test_patient_idx') and data_eval.test_patient_idx.numel() > 0:
+            test_idx = data_eval.test_patient_idx.cpu().numpy()
+            pred_metrics = PredictionAnalyzer.compute_metrics(y_all[test_idx], y_pred_all[test_idx])
+            print(f"Test AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f} (n={len(test_idx)})")
+
+    # LogReg baseline (ablation 5)
+    logreg_results = {}
+    if config.get('_prediction_method') == 'logreg' and hasattr(data_eval, 'y'):
+        y = data_eval.y.cpu().numpy()
+        logreg_results = LogisticRegressionBaseline.run(
+            z, labels, data_eval.patient_masks, y)
+
+    # Clinical association testing
+    clinical_results = {}
+    if ('response' in adata.obs.columns and 'patient_id' in adata.obs.columns
+            and hasattr(data_eval, 'y')):
+        fractions = ClinicalAssociationTest.compute_rare_fractions(
+            rare_labels, data_eval.patient_masks)
+        if not fractions.empty:
+            therapy = adata.obs.groupby('patient_id')['therapy'].first().values \
+                if 'therapy' in adata.obs.columns else None
+            response = data_eval.y.cpu().numpy()
+            clinical_results = ClinicalAssociationTest.test_association(
+                fractions, response, therapy=therapy)
+            ClinicalAssociationTest.summary(clinical_results)
+
+    print(f"\nGate: mean={gate_vals.mean():.3f}, std={gate_vals.std():.3f}")
+
+    # Save outputs
+    np.save(output_dir / 'embeddings.npy', z)
+    np.save(output_dir / 'rare_cell_scores.npy', scores)
+    np.save(output_dir / 'cluster_labels.npy', labels)
+    np.save(output_dir / 'gate_values.npy', gate_vals)
+    np.save(output_dir / 'confidence.npy', confidence)
+
+    if clinical_results:
+        with open(output_dir / 'clinical_association.json', 'w') as f:
+            json.dump(make_serializable(clinical_results), f, indent=2)
+
+    return {
+        'clustering': eval_metrics,
+        'prediction': pred_metrics,
+        'batch_mixing': batch_metrics,
+        'rare_cells': {'n_rare': int(is_rare.sum()), 'threshold': 2.0,
+                       'method': rare_method},
+        'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
+        'logreg_baseline': logreg_results,
+        'clinical_association': clinical_results,
+    }
+
+
 def run_single(args, config):
-    output_dir = Path('outputs') / args.data
+    ablation = getattr(args, 'ablation', None)
+    suffix = f'_{ablation}' if ablation else ''
+    output_dir = Path('outputs') / f'{args.data}{suffix}'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.data == 'synthetic':
@@ -91,6 +218,11 @@ def run_single(args, config):
         graph_kwargs = {'r_spatial': info.get('r_spatial', 82.5)}
     print(f"  {adata.n_obs} cells, {adata.n_vars} genes")
 
+    # Auto-detect mini-batch need
+    if adata.n_obs > 50_000 and config.get('batch_size') is None:
+        config['batch_size'] = 512
+        print(f"  [auto] Enabled mini-batch training (batch_size=512) for {adata.n_obs} cells")
+
     print("Building graph...")
     data = prepare_graph_data(adata, has_spatial=has_spatial, **graph_kwargs)
     print(f"  {data.edge_index.size(1)} edges, "
@@ -100,57 +232,24 @@ def run_single(args, config):
     has_response = hasattr(data, 'y') and data.y is not None
     model = build_model(config, data, has_response)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {total_params:,} parameters | Predictor: {has_response}")
+    print(f"Model: {total_params:,} parameters | Predictor: {has_response} "
+          f"| Encoder: {config.get('encoder_type', 'gat')} "
+          f"| Decoder: {config.get('decoder_type', 'zinb')} "
+          f"| Gate: {config.get('gate_mode', 'learned')}")
 
-    trainer = Trainer(model, config, device=config['device'], checkpoint_dir=output_dir)
+    freeze = config.get('freeze_encoder', False)
+    trainer = make_trainer(model, config, config['device'], output_dir, freeze_encoder=freeze, data=data)
     phase1_metrics = trainer.train(data)
 
     print("\n=== Downstream Analysis ===")
-    model.eval()
-    data_eval = data.to(config['device'])
-    with torch.no_grad():
-        outputs = model(data_eval)
-        z = outputs['z'].cpu().numpy()
-        mu = outputs['mu'].cpu().numpy()
-        logvar = outputs['logvar'].cpu().numpy()
-        gate_vals = outputs['gate_values'].cpu().numpy()
-
-    detector = RareCellDetector(threshold=2.0)
-    scores, is_rare = detector.detect(mu, logvar)
-    if is_rare.sum() > 10:
-        detector.subcluster(z, is_rare, resolution=2.0)
-    print(f"Rare cells: {is_rare.sum()} / {len(is_rare)}")
-
-    clusterer = ClusteringAnalyzer()
-    labels, confidence = clusterer.cluster(z, logvar=logvar, resolution=1.0)
-    eval_metrics = clusterer.evaluate(z, labels)
-    print(f"Clusters: {eval_metrics['n_clusters']}, Silhouette: {eval_metrics['silhouette']:.4f}")
-
-    pred_metrics = {}
-    if 'y_pred' in outputs and hasattr(data_eval, 'y'):
-        y_all = data_eval.y.cpu().numpy()
-        y_pred_all = outputs['y_pred'].detach().cpu().numpy()
-        if hasattr(data_eval, 'test_patient_idx') and data_eval.test_patient_idx.numel() > 0:
-            test_idx = data_eval.test_patient_idx.cpu().numpy()
-            pred_metrics = PredictionAnalyzer.compute_metrics(y_all[test_idx], y_pred_all[test_idx])
-            print(f"Test AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f} (n={len(test_idx)})")
-
-    print(f"\nGate: mean={gate_vals.mean():.3f}, std={gate_vals.std():.3f}")
-
-    np.save(output_dir / 'embeddings.npy', z)
-    np.save(output_dir / 'rare_cell_scores.npy', scores)
-    np.save(output_dir / 'cluster_labels.npy', labels)
-    np.save(output_dir / 'gate_values.npy', gate_vals)
-    np.save(output_dir / 'confidence.npy', confidence)
+    downstream = run_downstream(model, data, config, adata, output_dir, ablation=ablation)
 
     results = {
         'dataset': args.data,
-        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool))},
+        'ablation': ablation,
+        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list))},
         'phase1_metrics': phase1_metrics,
-        'clustering': eval_metrics,
-        'prediction': pred_metrics,
-        'rare_cells': {'n_rare': int(is_rare.sum()), 'threshold': 2.0},
-        'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
+        **downstream,
     }
     with open(output_dir / 'metrics.json', 'w') as f:
         json.dump(make_serializable(results), f, indent=2)
@@ -158,7 +257,9 @@ def run_single(args, config):
     print(f"\nOutputs saved to {output_dir}/")
 
 def run_cv(args, config, n_outer=5, n_permutations=1000):
-    output_dir = Path('outputs') / f'{args.data}_cv'
+    ablation = getattr(args, 'ablation', None)
+    suffix = f'_{ablation}' if ablation else ''
+    output_dir = Path('outputs') / f'{args.data}_cv{suffix}'
     output_dir.mkdir(parents=True, exist_ok=True)
 
     adata, info = load_real_data(args.data, n_hvg=args.n_hvg, max_cells=args.max_cells)
@@ -179,6 +280,11 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
     n_patients = len(unique_pids)
     n_resp = patient_responses.sum()
     print(f"  {n_patients} patients ({int(n_resp)} responders, {int(n_patients - n_resp)} non-responders)")
+
+    # Auto-detect mini-batch
+    if adata.n_obs > 50_000 and config.get('batch_size') is None:
+        config['batch_size'] = 512
+        print(f"  [auto] Enabled mini-batch training (batch_size=512) for {adata.n_obs} cells")
 
     print("Building graph...")
     data = prepare_graph_data(adata, has_spatial=has_spatial, **graph_kwargs)
@@ -219,7 +325,8 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         fold_dir.mkdir(exist_ok=True)
 
         model = build_model(config, data, use_predictor=True)
-        trainer = Trainer(model, config, device=config['device'], checkpoint_dir=fold_dir)
+        freeze = config.get('freeze_encoder', False)
+        trainer = make_trainer(model, config, config['device'], fold_dir, freeze_encoder=freeze, data=data)
         trainer.train(data)
 
         model.eval()
@@ -260,10 +367,12 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
     print(f"\n  Pooled AUROC: {pooled_metrics['auroc']:.3f}")
     print(f"  Pooled AUPRC: {pooled_metrics['auprc']:.3f}")
 
+    # Permutation test
     print(f"\nPermutation test ({n_permutations} permutations)...")
+    rng = np.random.RandomState(42)
     null_aurocs = np.zeros(n_permutations)
     for i in range(n_permutations):
-        y_perm = np.random.permutation(all_y_true)
+        y_perm = rng.permutation(all_y_true)
         try:
             null_aurocs[i] = roc_auc_score(y_perm, all_y_pred)
         except ValueError:
@@ -275,9 +384,10 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
 
     results = {
         'dataset': args.data,
+        'ablation': ablation,
         'n_folds': n_outer,
         'n_patients': n_patients,
-        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool))},
+        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list))},
         'cv_metrics': cv_metrics,
         'pooled_metrics': pooled_metrics,
         'permutation_test': {
@@ -302,9 +412,24 @@ def main():
     parser.add_argument('--cv', action='store_true')
     parser.add_argument('--n-folds', type=int, default=5)
     parser.add_argument('--n-permutations', type=int, default=1000)
+    parser.add_argument('--ablation', choices=list(ABLATION_REGISTRY.keys()),
+                        default=None, help='Ablation study to run')
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help='Mini-batch size (enables NeighborLoader training)')
     args = parser.parse_args()
+
     config = CONFIGS[args.config].copy()
-    print(f"Config: {args.config} | Device: {config['device']} | Data: {args.data} | CV: {args.cv}")
+
+    # Apply ablation overrides
+    if args.ablation:
+        config = apply_ablation(config, args.ablation)
+
+    # CLI batch-size override
+    if args.batch_size is not None:
+        config['batch_size'] = args.batch_size
+
+    print(f"Config: {args.config} | Device: {config['device']} | Data: {args.data} "
+          f"| CV: {args.cv} | Ablation: {args.ablation}")
 
     if args.cv:
         run_cv(args, config, n_outer=args.n_folds, n_permutations=args.n_permutations)

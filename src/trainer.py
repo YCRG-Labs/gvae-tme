@@ -26,6 +26,13 @@ class GVAELoss:
         return -log_lik.mean()
 
     @staticmethod
+    def gaussian(x, mu, logvar, eps=1e-8):
+        """Gaussian negative log-likelihood (ablation decoder)."""
+        logvar = torch.clamp(logvar, min=-10, max=10)
+        nll = 0.5 * (logvar + (x - mu).pow(2) / (logvar.exp() + eps))
+        return nll.mean()
+
+    @staticmethod
     def adjacency_negsampling(pos_scores, neg_scores):
         pos_loss = -torch.log(pos_scores + 1e-8).mean()
         neg_loss = -torch.log(1.0 - neg_scores + 1e-8).mean()
@@ -80,10 +87,11 @@ class GVAELoss:
         return F.binary_cross_entropy(y_pred, y_true.float())
 
 class Trainer:
-    def __init__(self, model, config, device='cpu', checkpoint_dir=None):
+    def __init__(self, model, config, device='cpu', checkpoint_dir=None, freeze_encoder=False):
         self.model = model.to(device)
         self.config = config
         self.device = device
+        self.freeze_encoder = freeze_encoder
         self.lambda1 = config.get('lambda1', 1.0)
         self.lambda2 = config.get('lambda2', 0.5)
         self.beta_target = config.get('beta', 0.01)
@@ -123,7 +131,12 @@ class Trainer:
     def setup_optimizer(self, phase=1):
         lr = self.lr if phase == 1 else self.lr_phase2
         epochs = self.epochs_phase1 if phase == 1 else self.epochs_phase2
-        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        if phase == 2 and self.freeze_encoder:
+            params = [p for n, p in self.model.named_parameters()
+                      if 'encoder' not in n and 'gate' not in n]
+        else:
+            params = self.model.parameters()
+        self.optimizer = optim.Adam(params, lr=lr)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs)
 
     def get_beta(self, epoch):
@@ -133,8 +146,14 @@ class Trainer:
 
     def compute_loss(self, outputs, data, phase=1, epoch=1):
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
+
+        # Expression loss: ZINB or Gaussian depending on decoder type
         x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
-        L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
+        if 'expr_mu' in outputs:
+            L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar'])
+        else:
+            L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
+
         beta = self.get_beta(epoch) if phase == 1 else self.beta_target
         L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'])
         L_contrast = torch.tensor(0.0, device=self.device)
@@ -162,15 +181,32 @@ class Trainer:
 
     @torch.no_grad()
     def evaluate(self, data):
+        """Evaluate reconstruction quality.
+
+        Note: this is a transductive GNN -- the full graph is used during both
+        training and evaluation (message passing requires neighbor features).
+        Reconstruction losses are computed over all nodes, which is standard
+        for graph autoencoders. A fixed seed makes the adjacency decoder's
+        negative sampling deterministic across eval calls so early-stopping
+        signals are stable.
+        """
         self.model.eval()
+        rng_state = torch.random.get_rng_state()
+        torch.manual_seed(0)
         outputs = self.model(data)
+        torch.random.set_rng_state(rng_state)
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
         x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
-        L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
+        if 'expr_mu' in outputs:
+            L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar'])
+        else:
+            L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
         return {'loss_adj': L_adj.item(), 'loss_expr': L_expr.item()}
 
     def train_epoch(self, data, phase=1, epoch=1):
         self.model.train()
+        if phase == 2 and self.freeze_encoder:
+            self.model.encoder.eval()
         self.optimizer.zero_grad()
         outputs = self.model(data)
         losses = self.compute_loss(outputs, data, phase, epoch)
@@ -224,6 +260,10 @@ class Trainer:
 
     def train_phase2(self, data):
         print("\n=== Phase 2: Joint Clinical Fine-Tuning ===")
+        if self.freeze_encoder:
+            print("  [ablation] Encoder frozen — only training predictor head")
+            self.model.encoder.requires_grad_(False)
+            self.model.gate.requires_grad_(False)
         self.gamma = self.gamma_phase2
         self.setup_optimizer(phase=2)
         best_val_loss = float('inf')
@@ -254,6 +294,9 @@ class Trainer:
                 if patience_counter >= self.patience // 10:
                     print(f"Early stopping at epoch {epoch}")
                     break
+        if self.freeze_encoder:
+            self.model.encoder.requires_grad_(True)
+            self.model.gate.requires_grad_(True)
         self.save_checkpoint("phase2")
         print("Phase 2 complete")
 

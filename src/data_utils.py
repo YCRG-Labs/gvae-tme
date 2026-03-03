@@ -5,20 +5,41 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.model_selection import GroupShuffleSplit
 from scipy.spatial import cKDTree
 
+
 def _build_molecular_graph(pca, k=15):
-    nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
-    nbrs.fit(pca)
-    dists, idxs = nbrs.kneighbors(pca)
+    n = len(pca)
+    # Use Annoy for large datasets (>100K cells) if available
+    if n > 100_000:
+        try:
+            from annoy import AnnoyIndex
+            d = pca.shape[1]
+            index = AnnoyIndex(d, 'euclidean')
+            for i in range(n):
+                index.add_item(i, pca[i])
+            index.build(50)  # 50 trees for recall >= 0.95
+            idxs = np.zeros((n, k + 1), dtype=np.int64)
+            dists = np.zeros((n, k + 1), dtype=np.float32)
+            for i in range(n):
+                nn_idx, nn_dist = index.get_nns_by_item(i, k + 1, include_distances=True)
+                idxs[i] = nn_idx
+                dists[i] = nn_dist
+            print(f"  [annoy] Built k-NN graph with Annoy (50 trees, {n} cells)")
+        except ImportError:
+            print(f"  [warn] annoy not installed, falling back to sklearn for {n} cells")
+            nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
+            nbrs.fit(pca)
+            dists, idxs = nbrs.kneighbors(pca)
+    else:
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
+        nbrs.fit(pca)
+        dists, idxs = nbrs.kneighbors(pca)
     sigma = float(np.median(dists[:, -1]))
-    src, dst, wts = [], [], []
-    for i in range(len(pca)):
-        for rank in range(1, k + 1):
-            j = int(idxs[i, rank])
-            d = float(dists[i, rank])
-            src.append(i)
-            dst.append(j)
-            wts.append(np.exp(-d ** 2 / (2 * sigma ** 2)))
-    return np.array(src), np.array(dst), np.array(wts, dtype=np.float32)
+    src = np.repeat(np.arange(n), k)
+    dst = idxs[:, 1:].ravel()
+    d = dists[:, 1:].ravel()
+    wts = np.exp(-d ** 2 / (2 * sigma ** 2)).astype(np.float32)
+    return src, dst, wts
+
 
 def _build_spatial_graph(coords, r, delta=None):
     if delta is None:
@@ -35,58 +56,54 @@ def _build_spatial_graph(coords, r, delta=None):
     wts = np.concatenate([wts, wts])
     return src, dst, wts
 
+
 def _build_union_edges(mol_src, mol_dst, mol_wts, spa_src, spa_dst, spa_wts, n_cells):
-    edge_dict_mol = {}
-    for s, d, w in zip(mol_src, mol_dst, mol_wts):
-        edge_dict_mol[(int(s), int(d))] = float(w)
-    edge_dict_spa = {}
-    for s, d, w in zip(spa_src, spa_dst, spa_wts):
-        edge_dict_spa[(int(s), int(d))] = float(w)
-    all_edges = set(edge_dict_mol.keys()) | set(edge_dict_spa.keys())
-    src_list, dst_list, mw_list, sw_list = [], [], [], []
-    for (s, d) in all_edges:
-        src_list.append(s)
-        dst_list.append(d)
-        mw_list.append(edge_dict_mol.get((s, d), 0.0))
-        sw_list.append(edge_dict_spa.get((s, d), 0.0))
-    edge_index = torch.tensor([src_list, dst_list], dtype=torch.long)
-    mol_weight = torch.tensor(mw_list, dtype=torch.float32)
-    spatial_weight = torch.tensor(sw_list, dtype=torch.float32)
+    mol_keys = mol_src.astype(np.int64) * n_cells + mol_dst.astype(np.int64)
+    spa_keys = spa_src.astype(np.int64) * n_cells + spa_dst.astype(np.int64)
+    all_keys, inverse = np.unique(np.concatenate([mol_keys, spa_keys]), return_inverse=True)
+    n_mol = len(mol_keys)
+    mol_lookup = np.zeros(len(all_keys), dtype=np.float32)
+    spa_lookup = np.zeros(len(all_keys), dtype=np.float32)
+    mol_lookup[inverse[:n_mol]] = mol_wts
+    spa_lookup[inverse[n_mol:]] = spa_wts
+    src_arr = (all_keys // n_cells).astype(np.int64)
+    dst_arr = (all_keys % n_cells).astype(np.int64)
+    edge_index = torch.tensor(np.stack([src_arr, dst_arr]), dtype=torch.long)
+    mol_weight = torch.tensor(mol_lookup, dtype=torch.float32)
+    spatial_weight = torch.tensor(spa_lookup, dtype=torch.float32)
     return edge_index, mol_weight, spatial_weight
+
 
 def _mine_contrastive_pairs(mol_idxs, coords, spatial_src, spatial_dst, r_far, k_neg=10):
     n_cells = len(coords)
-    pos_set = set()
-    for s, d in zip(spatial_src, spatial_dst):
-        pos_set.add((int(s), int(d)))
-    pos_pairs = torch.tensor(list(pos_set), dtype=torch.long) if pos_set else torch.zeros((0, 2), dtype=torch.long)
-    neg_list = []
-    for i in range(n_cells):
-        count = 0
-        for j in mol_idxs[i][1:]:
-            j = int(j)
-            dist = np.linalg.norm(coords[i] - coords[j])
-            if dist > r_far:
-                neg_list.append([i, j])
-                count += 1
-            if count >= k_neg:
-                break
-    if not neg_list:
-        pairwise_dists = np.array([np.linalg.norm(coords[int(mol_idxs[i][1])] - coords[i])
-                                   for i in range(n_cells)])
-        adaptive_r = np.percentile(pairwise_dists, 75)
-        for i in range(n_cells):
-            count = 0
-            for j in mol_idxs[i][1:]:
-                j = int(j)
-                dist = np.linalg.norm(coords[i] - coords[j])
-                if dist > adaptive_r:
-                    neg_list.append([i, j])
-                    count += 1
-                if count >= k_neg:
-                    break
-    neg_pairs = torch.tensor(neg_list, dtype=torch.long) if neg_list else torch.zeros((0, 2), dtype=torch.long)
+    if len(spatial_src) > 0:
+        pos_edges = np.column_stack([spatial_src, spatial_dst])
+        pos_edges_unique = np.unique(pos_edges, axis=0)
+        pos_pairs = torch.tensor(pos_edges_unique, dtype=torch.long)
+    else:
+        pos_pairs = torch.zeros((0, 2), dtype=torch.long)
+    neighbor_idxs = mol_idxs[:, 1:]
+    neighbor_coords = coords[neighbor_idxs]
+    dists = np.linalg.norm(neighbor_coords - coords[:, np.newaxis, :], axis=2)
+    far_mask = dists > r_far
+    cumsum = np.cumsum(far_mask, axis=1)
+    far_mask = far_mask & (cumsum <= k_neg)
+    cell_idx, neighbor_rank = np.where(far_mask)
+    neg_dst = neighbor_idxs[cell_idx, neighbor_rank]
+    if len(cell_idx) == 0:
+        nn_dists = dists[:, 0]
+        adaptive_r = np.percentile(nn_dists, 75)
+        far_mask2 = dists > adaptive_r
+        cumsum2 = np.cumsum(far_mask2, axis=1)
+        far_mask2 = far_mask2 & (cumsum2 <= k_neg)
+        cell_idx, neighbor_rank = np.where(far_mask2)
+        neg_dst = neighbor_idxs[cell_idx, neighbor_rank]
+    if len(cell_idx) > 0:
+        neg_pairs = torch.tensor(np.column_stack([cell_idx, neg_dst]), dtype=torch.long)
+    else:
+        neg_pairs = torch.zeros((0, 2), dtype=torch.long)
     return pos_pairs, neg_pairs
+
 
 def patient_level_split(adata, train_frac=0.7, val_frac=0.15, seed=42):
     patient_ids = adata.obs['patient_id'].values
@@ -103,6 +120,18 @@ def patient_level_split(adata, train_frac=0.7, val_frac=0.15, seed=42):
     val_mask = np.array([p in val_patients for p in patient_ids])
     test_mask = np.array([p in test_patients for p in patient_ids])
     return train_mask, val_mask, test_mask
+
+
+def _get_patient_response(adata, pid):
+    """Get response for a patient, asserting all cells agree."""
+    vals = adata.obs.loc[adata.obs['patient_id'] == pid, 'response'].unique()
+    if len(vals) != 1:
+        raise ValueError(
+            f"Patient {pid} has inconsistent response labels: {vals}. "
+            "All cells from the same patient must have the same response."
+        )
+    return float(vals[0])
+
 
 def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r_far_factor=5.0, k_neg=10, has_spatial=None):
     pca = adata.obsm['X_pca']
@@ -139,8 +168,7 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
         for pid in unique_pids:
             mask = torch.tensor(patient_ids == pid, dtype=torch.bool)
             patient_masks.append(mask)
-            resp = adata.obs.loc[adata.obs['patient_id'] == pid, 'response'].iloc[0]
-            responses.append(float(resp))
+            responses.append(_get_patient_response(adata, pid))
         data.patient_masks = patient_masks
         data.y = torch.tensor(responses, dtype=torch.float32)
         train_mask, val_mask, test_mask = patient_level_split(adata)
@@ -162,6 +190,7 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
         data.val_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(val_patients)], dtype=torch.long)
         data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in sorted(test_patients)], dtype=torch.long)
     return data
+
 
 def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10, n_cell_types=8, seed=42):
     np.random.seed(seed)

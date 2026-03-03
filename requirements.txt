@@ -9,4 +9,8 @@ numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
 seaborn>=0.12
+statsmodels>=0.14
+optuna>=3.0
 pytest>=7.0
+# Optional: annoy for fast KNN on >100K cells
+# annoy>=1.17

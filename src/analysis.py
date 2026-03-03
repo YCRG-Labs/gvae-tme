@@ -3,8 +3,10 @@ import warnings
 
 import anndata
 import numpy as np
+import pandas as pd
 import scanpy as sc
 import torch
+from scipy.stats import chi2
 from sklearn.metrics import (
     silhouette_score,
     roc_auc_score,
@@ -14,6 +16,7 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
 )
+from sklearn.neighbors import NearestNeighbors
 
 _HAS_LEIDEN = importlib.util.find_spec("leidenalg") is not None
 
@@ -248,3 +251,267 @@ class PredictionAnalyzer:
             'coords': coords,
             'high_attention_mask': mean_attn > np.percentile(mean_attn, 90),
         }
+
+
+# ── Feature 3: Batch Mixing Metrics ────────────────────────────────────────
+
+class BatchMixingAnalyzer:
+    """kBET and batch entropy for evaluating latent space batch mixing."""
+
+    @staticmethod
+    def kbet(z, batch_labels, k=50, alpha=0.05, subsample=5000):
+        """k-nearest-neighbor Batch Effect Test.
+
+        For each cell, tests whether the batch composition of its k-NN
+        matches the global batch proportions via chi-squared test.
+
+        Returns:
+            dict with 'rejection_rate' (lower = better mixing) and 'mean_p_value'.
+        """
+        n = len(z)
+        k = min(k, n - 1)
+        batch_labels = np.asarray(batch_labels)
+        unique_batches = np.unique(batch_labels)
+        n_batches = len(unique_batches)
+        if n_batches < 2:
+            return {'rejection_rate': 0.0, 'mean_p_value': 1.0, 'n_batches': n_batches}
+
+        batch_map = {b: i for i, b in enumerate(unique_batches)}
+        batch_idx = np.array([batch_map[b] for b in batch_labels])
+        global_freq = np.bincount(batch_idx, minlength=n_batches) / n
+
+        # Subsample for speed
+        if n > subsample:
+            rng = np.random.RandomState(42)
+            idx = rng.choice(n, subsample, replace=False)
+        else:
+            idx = np.arange(n)
+
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
+        nbrs.fit(z)
+        _, neighbors = nbrs.kneighbors(z[idx])
+        neighbors = neighbors[:, 1:]  # exclude self
+
+        p_values = np.zeros(len(idx))
+        for i, row in enumerate(neighbors):
+            observed = np.bincount(batch_idx[row], minlength=n_batches)
+            expected = global_freq * k
+            # Chi-squared statistic, only for bins with expected > 0
+            mask = expected > 0
+            chi2_stat = np.sum((observed[mask] - expected[mask]) ** 2 / expected[mask])
+            df = mask.sum() - 1
+            if df > 0:
+                p_values[i] = 1.0 - chi2.cdf(chi2_stat, df)
+            else:
+                p_values[i] = 1.0
+
+        rejection_rate = float(np.mean(p_values < alpha))
+        return {
+            'rejection_rate': rejection_rate,
+            'mean_p_value': float(np.mean(p_values)),
+            'n_batches': n_batches,
+        }
+
+    @staticmethod
+    def batch_entropy(z, batch_labels, k=50, subsample=5000):
+        """Normalized Shannon entropy of batch labels in k-NN neighborhoods.
+
+        Returns mean entropy in [0, 1] where 1 = perfectly mixed.
+        """
+        n = len(z)
+        k = min(k, n - 1)
+        batch_labels = np.asarray(batch_labels)
+        unique_batches = np.unique(batch_labels)
+        n_batches = len(unique_batches)
+        if n_batches < 2:
+            return {'batch_entropy': 1.0, 'n_batches': n_batches}
+
+        batch_map = {b: i for i, b in enumerate(unique_batches)}
+        batch_idx = np.array([batch_map[b] for b in batch_labels])
+
+        if n > subsample:
+            rng = np.random.RandomState(42)
+            idx = rng.choice(n, subsample, replace=False)
+        else:
+            idx = np.arange(n)
+
+        nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
+        nbrs.fit(z)
+        _, neighbors = nbrs.kneighbors(z[idx])
+        neighbors = neighbors[:, 1:]
+
+        max_entropy = np.log(n_batches)
+        entropies = np.zeros(len(idx))
+        for i, row in enumerate(neighbors):
+            counts = np.bincount(batch_idx[row], minlength=n_batches)
+            p = counts / counts.sum()
+            p = p[p > 0]
+            entropies[i] = -np.sum(p * np.log(p)) / max_entropy
+
+        return {'batch_entropy': float(np.mean(entropies)), 'n_batches': n_batches}
+
+
+# ── Feature 3: Cross-Dataset Concordance ────────────────────────────────────
+
+class CrossDatasetAnalyzer:
+    """Marker gene overlap (Jaccard) for cross-dataset concordance."""
+
+    @staticmethod
+    def marker_genes(z, labels, adata, n_markers=50):
+        """Identify marker genes per cluster using Wilcoxon rank-sum test.
+
+        Returns dict mapping cluster_id → list of marker gene names.
+        """
+        ad = adata.copy()
+        ad.obs['gvae_cluster'] = pd.Categorical(labels.astype(str))
+        ad.obsm['X_latent'] = z
+        unique_labels = np.unique(labels)
+        if len(unique_labels) < 2:
+            return {str(labels[0]): list(adata.var_names[:n_markers])}
+        sc.tl.rank_genes_groups(ad, groupby='gvae_cluster', method='wilcoxon',
+                                n_genes=n_markers, use_raw=False)
+        markers = {}
+        for cl in unique_labels:
+            genes = ad.uns['rank_genes_groups']['names'][str(cl)][:n_markers]
+            markers[str(cl)] = list(genes)
+        return markers
+
+    @staticmethod
+    def jaccard_concordance(markers_a, markers_b):
+        """Compute Jaccard similarity between two sets of cluster marker genes.
+
+        Matches clusters greedily by highest Jaccard overlap.
+        Returns per-pair scores and mean Jaccard.
+        """
+        pairs = {}
+        for cl_a, genes_a in markers_a.items():
+            set_a = set(genes_a)
+            best_j, best_cl = 0.0, None
+            for cl_b, genes_b in markers_b.items():
+                set_b = set(genes_b)
+                inter = len(set_a & set_b)
+                union = len(set_a | set_b)
+                j = inter / union if union > 0 else 0.0
+                if j > best_j:
+                    best_j = j
+                    best_cl = cl_b
+            pairs[cl_a] = {'matched_cluster': best_cl, 'jaccard': best_j}
+
+        mean_jaccard = float(np.mean([v['jaccard'] for v in pairs.values()])) if pairs else 0.0
+        return {'per_cluster': pairs, 'mean_jaccard': mean_jaccard}
+
+
+# ── Feature 5: Clinical Association Testing ─────────────────────────────────
+
+class ClinicalAssociationTest:
+    """Test clinical relevance of GVAE-discovered rare cell states (Section 3.6).
+
+    Associates abundance of each rare subpopulation with immunotherapy response
+    via logistic regression, adjusting for therapy type.
+    """
+
+    @staticmethod
+    def compute_rare_fractions(rare_labels, patient_masks):
+        """Per-patient fraction of each rare subpopulation.
+
+        Args:
+            rare_labels: array of cluster labels (-1=normal, 100+=rare)
+            patient_masks: list of boolean tensors, one per patient
+
+        Returns:
+            DataFrame of shape (n_patients, n_rare_clusters)
+        """
+        rare_clusters = sorted(set(rare_labels[rare_labels >= 100]))
+        if len(rare_clusters) == 0:
+            return pd.DataFrame()
+
+        rows = []
+        for mask in patient_masks:
+            mask_np = mask.cpu().numpy() if hasattr(mask, 'cpu') else np.asarray(mask)
+            n_cells = mask_np.sum()
+            patient_labels = rare_labels[mask_np]
+            fracs = {}
+            for rc in rare_clusters:
+                fracs[f'rare_{rc}'] = (patient_labels == rc).sum() / max(n_cells, 1)
+            rows.append(fracs)
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def test_association(fractions_df, response, therapy=None, alpha=0.05):
+        """Logistic regression: response ~ rare_fractions [+ therapy].
+
+        Returns per-feature coefficients, p-values, and BH-corrected q-values.
+        """
+        if fractions_df.empty:
+            return {'features': [], 'note': 'No rare subpopulations detected'}
+
+        try:
+            import statsmodels.api as sm
+        except ImportError:
+            warnings.warn("statsmodels not installed; skipping clinical association test",
+                          RuntimeWarning)
+            return {'features': [], 'note': 'statsmodels not installed'}
+
+        y = np.asarray(response, dtype=float)
+        X = fractions_df.values.copy()
+        feature_names = list(fractions_df.columns)
+
+        # Add therapy as dummy variables if provided
+        if therapy is not None:
+            therapy = np.asarray(therapy)
+            unique_therapies = np.unique(therapy)
+            if len(unique_therapies) > 1:
+                for t in unique_therapies[1:]:  # drop first as reference
+                    col = (therapy == t).astype(float)
+                    X = np.column_stack([X, col])
+                    feature_names.append(f'therapy_{t}')
+
+        X = sm.add_constant(X, has_constant='add')
+
+        try:
+            model = sm.Logit(y, X)
+            result = model.fit(disp=0, maxiter=500)
+        except Exception as e:
+            return {'features': [], 'note': f'Logit fit failed: {e}'}
+
+        # Extract results (skip constant at index 0)
+        features = []
+        pvals = []
+        for i, name in enumerate(feature_names):
+            idx = i + 1  # skip constant
+            features.append({
+                'name': name,
+                'coef': float(result.params[idx]),
+                'se': float(result.bse[idx]),
+                'z': float(result.tvalues[idx]),
+                'p_value': float(result.pvalues[idx]),
+            })
+            pvals.append(result.pvalues[idx])
+
+        # Benjamini-Hochberg FDR correction
+        if len(pvals) > 0:
+            from statsmodels.stats.multitest import multipletests
+            reject, qvals, _, _ = multipletests(pvals, alpha=alpha, method='fdr_bh')
+            for feat, q, rej in zip(features, qvals, reject):
+                feat['q_value'] = float(q)
+                feat['significant'] = bool(rej)
+
+        significant = [f for f in features if f.get('significant', False)]
+        return {
+            'features': features,
+            'n_significant': len(significant),
+            'n_tested': len(features),
+        }
+
+    @staticmethod
+    def summary(results):
+        """Print summary of clinical association results."""
+        if not results.get('features'):
+            print(f"  Clinical association: {results.get('note', 'no results')}")
+            return
+        print(f"  Clinical association: {results['n_significant']}/{results['n_tested']} "
+              f"features significant (FDR < 0.05)")
+        for f in results['features']:
+            sig_marker = '*' if f.get('significant', False) else ' '
+            print(f"    {sig_marker} {f['name']}: coef={f['coef']:.3f}, "
+                  f"p={f['p_value']:.4f}, q={f.get('q_value', 'N/A')}")

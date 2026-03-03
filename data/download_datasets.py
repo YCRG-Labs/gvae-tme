@@ -213,6 +213,20 @@ def process_melanoma():
     meta["timepoint"] = meta["sample_id"].str.extract(r"^(Pre|Post)", expand=False)
     meta["response"] = (meta_raw[resp_col_name].values == "Responder").astype(int)
     meta["therapy"] = meta_raw["characteristics: therapy"].values
+
+    # Fix GEO metadata inconsistency: some patients (P1, P4, P5, P28) have
+    # conflicting response labels across sequencing batches (e.g. Post_P1 vs
+    # Post_P1_2).  Resolve to a single label per patient via majority vote.
+    for pid in meta["patient_id"].unique():
+        pid_mask = meta["patient_id"] == pid
+        resp_vals = meta.loc[pid_mask, "response"]
+        if resp_vals.nunique() > 1:
+            majority_label = int(resp_vals.mode().iloc[0])
+            n_before = resp_vals.value_counts().to_dict()
+            meta.loc[pid_mask, "response"] = majority_label
+            print(f"    [fix] {pid}: inconsistent response labels {n_before} "
+                  f"-> resolved to {'Responder' if majority_label else 'Non-responder'} (majority vote)")
+
     print(f"    {len(meta)} cells, {meta['patient_id'].nunique()} patients, "
           f"{meta['sample_id'].nunique()} samples")
 
