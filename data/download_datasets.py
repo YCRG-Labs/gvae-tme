@@ -256,16 +256,255 @@ def process_melanoma():
     print(f"  Saved: {out_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
 
 
+def process_breast():
+    print("\n=== Processing breast cancer (GSE243280) into h5ad ===")
+    raw_dir = RAW_DIR / "breast"
+
+    try:
+        import scanpy as sc
+        import anndata
+        import numpy as np
+        import warnings
+        warnings.filterwarnings("ignore")
+    except ImportError as e:
+        print(f"  [error] Missing dependency: {e}")
+        return
+
+    h5_files = [
+        ("5p_scrna", "GSM7782696_5p_count_filtered_feature_bc_matrix.h5"),
+        ("3p_scrna", "GSM7782697_3p_count_filtered_feature_bc_matrix.h5"),
+        ("visium_raw", "GSM7782698_count_raw_feature_bc_matrix.h5"),
+        ("visium_filt", "GSM7782699_filtered_feature_bc_matrix.h5"),
+    ]
+
+    adatas = []
+    for label, fname in h5_files:
+        path = raw_dir / fname
+        if not path.exists():
+            print(f"  [skip] {fname} not found")
+            continue
+        print(f"  Reading {label}: {fname}...")
+        ad = sc.read_10x_h5(str(path))
+        ad.var_names_make_unique()
+        ad.obs["sample"] = label
+        print(f"    {ad.n_obs} cells x {ad.n_vars} genes")
+        adatas.append(ad)
+
+    if not adatas:
+        print("  [skip] No H5 files found. Run download/extract first.")
+        return
+
+    print(f"  Concatenating {len(adatas)} samples...")
+    adata = anndata.concat(adatas, join="outer", fill_value=0)
+    adata.var_names_make_unique()
+    print(f"  Combined: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    print("  QC filtering...")
+    sc.pp.filter_cells(adata, min_genes=200)
+    sc.pp.filter_genes(adata, min_cells=3)
+    adata.var["mt"] = adata.var_names.str.startswith("MT-")
+    sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+    adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
+    print(f"  After QC: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    sc.pp.normalize_total(adata, target_sum=10000)
+    sc.pp.log1p(adata)
+    n_top = min(2000, adata.n_vars)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+    sc.pp.pca(adata, n_comps=n_comps)
+
+    coords = np.random.randn(adata.n_obs, 2).astype(np.float32) * 100
+    adata.obsm["spatial"] = coords
+
+    out_path = PROCESSED_DIR / "breast.h5ad"
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    adata.write(out_path)
+    print(f"  Saved: {out_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
+
+
+def process_colorectal():
+    print("\n=== Processing colorectal cancer (GSE280318) into h5ad ===")
+    raw_dir = RAW_DIR / "colorectal"
+
+    try:
+        import scanpy as sc
+        import anndata
+        import numpy as np
+        import re
+        import warnings
+        warnings.filterwarnings("ignore")
+    except ImportError as e:
+        print(f"  [error] Missing dependency: {e}")
+        return
+
+    h5_files = sorted([f for f in os.listdir(raw_dir) if f.endswith(".h5")])
+    if not h5_files:
+        print("  [skip] No H5 files found. Run download/extract first.")
+        return
+    print(f"  Found {len(h5_files)} H5 files")
+
+    adatas = []
+    for i, fname in enumerate(h5_files):
+        path = raw_dir / fname
+        ad = sc.read_10x_h5(str(path))
+        ad.var_names_make_unique()
+        m = re.search(r"_(P\d+)(CRC|NAT)_(BC\d+)_", fname)
+        if m:
+            ad.obs["patient"] = m.group(1)
+            ad.obs["tissue"] = m.group(2)
+        else:
+            ad.obs["patient"] = "unknown"
+            ad.obs["tissue"] = "unknown"
+        adatas.append(ad)
+        if (i + 1) % 10 == 0:
+            print(f"    {i+1}/{len(h5_files)} files read")
+
+    print(f"  Concatenating {len(adatas)} samples...")
+    adata = anndata.concat(adatas, join="outer", fill_value=0)
+    adata.var_names_make_unique()
+    print(f"  Combined: {adata.n_obs} spots x {adata.n_vars} genes")
+
+    print("  QC filtering...")
+    sc.pp.filter_cells(adata, min_genes=50)
+    sc.pp.filter_genes(adata, min_cells=3)
+    print(f"  After QC: {adata.n_obs} spots x {adata.n_vars} genes")
+
+    sc.pp.normalize_total(adata, target_sum=10000)
+    sc.pp.log1p(adata)
+    n_top = min(2000, adata.n_vars)
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top)
+    n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+    sc.pp.pca(adata, n_comps=n_comps)
+
+    coords = np.random.randn(adata.n_obs, 2).astype(np.float32) * 100
+    adata.obsm["spatial"] = coords
+
+    out_path = PROCESSED_DIR / "colorectal.h5ad"
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    adata.write(out_path)
+    print(f"  Saved: {out_path} ({adata.n_obs} spots, {adata.n_vars} genes)")
+
+
+def process_nsclc():
+    print("\n=== Processing NSCLC into h5ad ===")
+    raw_dir = RAW_DIR / "nsclc"
+
+    try:
+        import scanpy as sc
+        import anndata
+        import numpy as np
+        import h5py
+        from scipy.sparse import lil_matrix
+        import warnings
+        warnings.filterwarnings("ignore")
+    except ImportError as e:
+        print(f"  [error] Missing dependency: {e}")
+        return
+
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    mtx_dir = raw_dir / "filtered_feature_bc_matrix"
+    if mtx_dir.exists():
+        print("  Reading scRNA-seq (10x MTX)...")
+        adata_sc = sc.read_10x_mtx(str(mtx_dir), var_names="gene_symbols", cache=False)
+        sc.pp.filter_cells(adata_sc, min_genes=200)
+        sc.pp.filter_genes(adata_sc, min_cells=3)
+        adata_sc.var["mt"] = adata_sc.var_names.str.startswith("MT-")
+        sc.pp.calculate_qc_metrics(adata_sc, qc_vars=["mt"], inplace=True)
+        adata_sc = adata_sc[adata_sc.obs["pct_counts_mt"] < 20].copy()
+        sc.pp.normalize_total(adata_sc, target_sum=10000)
+        sc.pp.log1p(adata_sc)
+        n_top = min(2000, adata_sc.n_vars)
+        sc.pp.highly_variable_genes(adata_sc, n_top_genes=n_top)
+        n_comps = min(50, adata_sc.n_obs - 1, adata_sc.n_vars - 1)
+        sc.pp.pca(adata_sc, n_comps=n_comps)
+        coords = np.random.randn(adata_sc.n_obs, 2).astype(np.float32) * 100
+        adata_sc.obsm["spatial"] = coords
+        out_sc = PROCESSED_DIR / "nsclc_scrna.h5ad"
+        adata_sc.write(out_sc)
+        print(f"  Saved: {out_sc} ({adata_sc.n_obs} cells, {adata_sc.n_vars} genes)")
+
+    h5_path = raw_dir / "Visium_HD_Human_Lung_Cancer_Fixed_Frozen_feature_slice.h5"
+    if h5_path.exists():
+        print("  Reading Visium HD feature slice (2um -> 16um binning)...")
+        f = h5py.File(str(h5_path), "r")
+        gene_names = [g.decode() for g in f["features"]["name"][:]]
+        gene_ids = [g.decode() for g in f["features"]["id"][:]]
+        n_genes_total = len(gene_names)
+
+        bin_size = 8
+        grid_rows, grid_cols = 3350, 3350
+        binned_rows = (grid_rows + bin_size - 1) // bin_size
+        binned_cols = (grid_cols + bin_size - 1) // bin_size
+
+        umis_row = f["umis"]["total"]["row"][:]
+        umis_col = f["umis"]["total"]["col"][:]
+        umis_data = f["umis"]["total"]["data"][:]
+        br = umis_row // bin_size
+        bc = umis_col // bin_size
+        bin_idx = br * binned_cols + bc
+        total_umi = np.zeros(binned_rows * binned_cols, dtype=np.float64)
+        np.add.at(total_umi, bin_idx, umis_data.astype(np.float64))
+        valid_bins = np.where(total_umi > 10)[0]
+        n_bins = len(valid_bins)
+        bin_remap = {old: new for new, old in enumerate(valid_bins)}
+        print(f"    {n_bins} bins with >10 UMI")
+
+        slice_keys = sorted(f["feature_slices"].keys(), key=int)
+        mat = lil_matrix((n_bins, n_genes_total), dtype=np.float32)
+        for i, gk in enumerate(slice_keys):
+            gi = int(gk)
+            s = f["feature_slices"][gk]
+            r = s["row"][:] // bin_size
+            c = s["col"][:] // bin_size
+            d = s["data"][:]
+            bidx = r * binned_cols + c
+            for b, v in zip(bidx, d):
+                lin = int(b)
+                if lin in bin_remap:
+                    mat[bin_remap[lin], gi] += v
+            if (i + 1) % 5000 == 0:
+                print(f"      {i+1}/{len(slice_keys)} genes")
+
+        coords = np.zeros((n_bins, 2), dtype=np.float32)
+        for new_idx, old_idx in enumerate(valid_bins):
+            coords[new_idx, 0] = (old_idx // binned_cols) * 16.0
+            coords[new_idx, 1] = (old_idx % binned_cols) * 16.0
+
+        adata_vis = anndata.AnnData(X=mat.tocsr())
+        adata_vis.var_names = gene_names
+        adata_vis.var["gene_ids"] = gene_ids
+        adata_vis.var_names_make_unique()
+        adata_vis.obsm["spatial"] = coords
+
+        sc.pp.filter_cells(adata_vis, min_genes=50)
+        sc.pp.filter_genes(adata_vis, min_cells=3)
+        sc.pp.normalize_total(adata_vis, target_sum=10000)
+        sc.pp.log1p(adata_vis)
+        n_top = min(2000, adata_vis.n_vars)
+        sc.pp.highly_variable_genes(adata_vis, n_top_genes=n_top)
+        n_comps = min(50, adata_vis.n_obs - 1, adata_vis.n_vars - 1)
+        sc.pp.pca(adata_vis, n_comps=n_comps)
+
+        out_vis = PROCESSED_DIR / "nsclc_visium.h5ad"
+        adata_vis.write(out_vis)
+        print(f"  Saved: {out_vis} ({adata_vis.n_obs} bins, {adata_vis.n_vars} genes)")
+        f.close()
+
+
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Download GVAE-TME datasets")
+    parser = argparse.ArgumentParser(description="Download and process GVAE-TME datasets")
     parser.add_argument(
         "datasets",
         nargs="*",
         default=["all"],
-        choices=["all", "melanoma", "breast", "colorectal", "nsclc", "process"],
-        help="Which datasets to download",
+        choices=["all", "melanoma", "breast", "colorectal", "nsclc",
+                 "process", "process-melanoma", "process-breast",
+                 "process-colorectal", "process-nsclc"],
+        help="Which datasets to download or process",
     )
     args = parser.parse_args()
 
@@ -286,6 +525,17 @@ def main():
             download_nsclc()
         elif t == "process":
             process_melanoma()
+            process_breast()
+            process_colorectal()
+            process_nsclc()
+        elif t == "process-melanoma":
+            process_melanoma()
+        elif t == "process-breast":
+            process_breast()
+        elif t == "process-colorectal":
+            process_colorectal()
+        elif t == "process-nsclc":
+            process_nsclc()
 
     print("\n=== Summary ===")
     for name in ["melanoma", "breast", "colorectal", "nsclc"]:
@@ -296,9 +546,12 @@ def main():
         else:
             print(f"  {name}: not downloaded")
 
-    print("\nNext steps:")
-    print("  python data/download_datasets.py process   # convert melanoma to h5ad")
-    print("  For breast/colorectal/nsclc, processing scripts coming after download.")
+    processed = PROCESSED_DIR
+    if processed.exists():
+        for f in sorted(processed.iterdir()):
+            if f.suffix == ".h5ad":
+                size_mb = f.stat().st_size / 1e6
+                print(f"  processed/{f.name}: {size_mb:.0f} MB")
 
 
 if __name__ == "__main__":
