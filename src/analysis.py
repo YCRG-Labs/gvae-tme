@@ -165,7 +165,8 @@ class AttentionAnalyzer:
         neighbor_attns = {}
         for idx in range(edge_index.size(1)):
             tgt = edge_index[1, idx].item()
-            w = attention_weights[idx].item()
+            w = attention_weights[idx]
+            w = w.mean().item() if w.dim() > 0 else w.item()
             if tgt not in neighbor_attns:
                 neighbor_attns[tgt] = []
             neighbor_attns[tgt].append(w)
