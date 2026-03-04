@@ -215,7 +215,7 @@ class GVAEModel(nn.Module):
     def forward(self, data):
         x = data.x
         edge_index = data.edge_index
-        has_spatial = data.spatial_weight.any()
+        has_spatial = data.spatial_weight.any().item()
         if has_spatial:
             hybrid_weight, gate_values = self.compute_hybrid_weights(x, data.mol_weight, data.spatial_weight, edge_index)
         else:

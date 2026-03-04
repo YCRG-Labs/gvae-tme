@@ -185,9 +185,14 @@ class Trainer:
 
         self.model.eval()
         rng_state = torch.random.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state() if self.device != 'cpu' and torch.cuda.is_available() else None
         torch.manual_seed(0)
+        if cuda_rng_state is not None:
+            torch.cuda.manual_seed(0)
         outputs = self.model(data)
         torch.random.set_rng_state(rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state(cuda_rng_state)
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
         x_raw = data.x_raw if hasattr(data, 'x_raw') else data.x
         if 'expr_mu' in outputs:

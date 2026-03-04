@@ -28,10 +28,53 @@ class MiniBatchTrainer(Trainer):
             shuffle=shuffle,
         )
 
+    def _collect_embeddings(self, data):
+        self.model.eval()
+        orig = self.model.use_predictor
+        self.model.use_predictor = False
+        loader = self._make_loader(data, shuffle=False)
+        z_parts = []
+        idx_parts = []
+        with torch.no_grad():
+            for batch in loader:
+                batch = batch.to(self.device)
+                outputs = self.model(batch)
+                n_seed = batch.batch_size
+                z_parts.append(outputs['z'][:n_seed].cpu())
+                idx_parts.append(batch.n_id[:n_seed].cpu())
+        self.model.use_predictor = orig
+        z_cat = torch.cat(z_parts, dim=0)
+        idx_cat = torch.cat(idx_parts, dim=0)
+        z_all = torch.zeros(data.num_nodes, z_cat.shape[1])
+        z_all[idx_cat] = z_cat
+        return z_all
+
+    def _train_predictor_step(self, data):
+        z_full = self._collect_embeddings(data)
+        self.model.predictor.train()
+        z_dev = z_full.to(self.device)
+        masks_dev = [m.to(self.device) for m in data.patient_masks]
+        y_pred, _ = self.model.predictor(z_dev, masks_dev)
+        if hasattr(data, 'train_patient_idx'):
+            y_train = data.y[data.train_patient_idx].to(self.device)
+            pred_train = y_pred[data.train_patient_idx]
+            if y_train.numel() == 0:
+                return 0.0
+            L_pred = self.loss_fn.prediction(y_train, pred_train)
+        else:
+            L_pred = self.loss_fn.prediction(data.y.to(self.device), y_pred)
+        self.optimizer.zero_grad()
+        (self.gamma * L_pred).backward()
+        clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+        self.optimizer.step()
+        return L_pred.item()
+
     def train_epoch(self, data, phase=1, epoch=1):
         self.model.train()
         if phase == 2 and self.freeze_encoder:
             self.model.encoder.eval()
+        orig_pred = self.model.use_predictor
+        self.model.use_predictor = False
         loader = self._make_loader(data, shuffle=True)
         epoch_losses = {'total': 0, 'adj': 0, 'expr': 0, 'kl': 0, 'contrast': 0, 'pred': 0}
         n_batches = 0
@@ -49,6 +92,7 @@ class MiniBatchTrainer(Trainer):
                 epoch_losses[k] += losses[k] if k == 'total' else losses.get(k, 0)
             n_batches += 1
 
+        self.model.use_predictor = orig_pred
         self.scheduler.step()
 
         for k in epoch_losses:
@@ -69,34 +113,26 @@ class MiniBatchTrainer(Trainer):
         beta = self.get_beta(epoch) if phase == 1 else self.beta_target
         L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'])
 
-        L_contrast = torch.tensor(0.0, device=self.device)
-
-        L_pred = torch.tensor(0.0, device=self.device)
-        if phase == 2 and 'y_pred' in outputs and hasattr(batch, 'y'):
-            if hasattr(batch, 'train_patient_idx'):
-                y_train = batch.y[batch.train_patient_idx]
-                pred_train = outputs['y_pred'][batch.train_patient_idx]
-                if y_train.numel() > 0:
-                    L_pred = self.loss_fn.prediction(y_train, pred_train)
-            else:
-                L_pred = self.loss_fn.prediction(batch.y, outputs['y_pred'])
-
-        total = (L_adj + self.lambda1 * L_expr + beta * L_kl
-                 + self.lambda2 * L_contrast + self.gamma * L_pred)
+        total = L_adj + self.lambda1 * L_expr + beta * L_kl
         return {
             'total': total,
             'adj': L_adj.item(),
             'expr': L_expr.item(),
             'kl': L_kl.item(),
-            'contrast': L_contrast.item(),
-            'pred': L_pred.item() if isinstance(L_pred, torch.Tensor) else L_pred,
+            'contrast': 0.0,
+            'pred': 0.0,
         }
 
     @torch.no_grad()
     def evaluate(self, data):
         self.model.eval()
+        orig = self.model.use_predictor
+        self.model.use_predictor = False
         rng_state = torch.random.get_rng_state()
+        cuda_rng_state = torch.cuda.get_rng_state() if self.device != 'cpu' and torch.cuda.is_available() else None
         torch.manual_seed(0)
+        if cuda_rng_state is not None:
+            torch.cuda.manual_seed(0)
         loader = self._make_loader(data, shuffle=False)
         total_adj = 0.0
         total_expr = 0.0
@@ -114,6 +150,9 @@ class MiniBatchTrainer(Trainer):
             total_expr += L_expr.item()
             n_batches += 1
         torch.random.set_rng_state(rng_state)
+        if cuda_rng_state is not None:
+            torch.cuda.set_rng_state(cuda_rng_state)
+        self.model.use_predictor = orig
         return {
             'loss_adj': total_adj / max(n_batches, 1),
             'loss_expr': total_expr / max(n_batches, 1),
@@ -121,23 +160,18 @@ class MiniBatchTrainer(Trainer):
 
     @torch.no_grad()
     def evaluate_prediction(self, data):
-        self.model.eval()
-        loader = self._make_loader(data, shuffle=False)
-        all_y_pred = []
-        all_y_true = []
-        for batch in loader:
-            batch = batch.to(self.device)
-            outputs = self.model(batch)
-            if 'y_pred' in outputs and hasattr(batch, 'y'):
-                if hasattr(batch, 'val_patient_idx') and batch.val_patient_idx.numel() > 0:
-                    idx = batch.val_patient_idx
-                    all_y_pred.append(outputs['y_pred'][idx].cpu())
-                    all_y_true.append(batch.y[idx].cpu())
-        if not all_y_pred:
+        if not hasattr(data, 'patient_masks'):
             return 0.0
-        y_pred = torch.cat(all_y_pred)
-        y_true = torch.cat(all_y_true)
-        return self.loss_fn.prediction(y_true, y_pred).item()
+        z_full = self._collect_embeddings(data)
+        z_dev = z_full.to(self.device)
+        masks_dev = [m.to(self.device) for m in data.patient_masks]
+        self.model.predictor.eval()
+        y_pred, _ = self.model.predictor(z_dev, masks_dev)
+        if hasattr(data, 'val_patient_idx') and data.val_patient_idx.numel() > 0:
+            y_val = data.y[data.val_patient_idx].to(self.device)
+            pred_val = y_pred[data.val_patient_idx]
+            return self.loss_fn.prediction(y_val, pred_val).item()
+        return 0.0
 
     def train(self, data):
         phase1_metrics = self.train_phase1(data)
@@ -191,8 +225,13 @@ class MiniBatchTrainer(Trainer):
         best_val_loss = float('inf')
         patience_counter = 0
         gamma_reductions = 0
+        has_predictor = self.model.use_predictor and hasattr(data, 'patient_masks')
         for epoch in range(1, self.epochs_phase2 + 1):
             losses = self.train_epoch(data, phase=2, epoch=epoch)
+            pred_loss = 0.0
+            if has_predictor:
+                pred_loss = self._train_predictor_step(data)
+                losses['pred'] = pred_loss
             if epoch % 10 == 0:
                 val = self.evaluate(data)
                 val_loss = val['loss_adj'] + val['loss_expr']
@@ -206,7 +245,7 @@ class MiniBatchTrainer(Trainer):
                     if gamma_reductions >= self.max_gamma_reductions:
                         print("  Cannot maintain reconstruction quality. Stopping Phase 2.")
                         break
-                val_pred = self.evaluate_prediction(data)
+                val_pred = self.evaluate_prediction(data) if has_predictor else 0.0
                 print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} "
                       f"L_pred={losses['pred']:.4f} val_pred={val_pred:.4f} gamma={self.gamma:.4f}")
                 if val_loss < best_val_loss:

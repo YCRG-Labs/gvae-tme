@@ -112,14 +112,17 @@ class ClusteringAnalyzer:
             return hard_labels, np.ones(len(z))
         confidence = self.compute_confidence(logvar)
         c_thresh = np.percentile(confidence, 20)
-        n_clusters = len(np.unique(hard_labels))
+        unique_labels = np.unique(hard_labels)
+        n_clusters = len(unique_labels)
+        label_to_idx = {l: i for i, l in enumerate(unique_labels)}
+        mapped_labels = np.array([label_to_idx[l] for l in hard_labels])
         centroids = np.zeros((n_clusters, z.shape[1]))
         for m in range(n_clusters):
-            mask = (hard_labels == m) & (confidence >= c_thresh)
+            mask = (mapped_labels == m) & (confidence >= c_thresh)
             if mask.sum() > 0:
                 centroids[m] = z[mask].mean(axis=0)
             else:
-                centroids[m] = z[hard_labels == m].mean(axis=0)
+                centroids[m] = z[mapped_labels == m].mean(axis=0)
         soft_assignments = np.zeros((len(z), n_clusters))
         uncertain_mask = confidence < c_thresh
         for i in np.where(uncertain_mask)[0]:
@@ -131,9 +134,11 @@ class ClusteringAnalyzer:
             exp_logits = np.exp(logits)
             soft_assignments[i] = exp_logits / (exp_logits.sum() + 1e-8)
         for i in np.where(~uncertain_mask)[0]:
-            soft_assignments[i, hard_labels[i]] = 1.0
-        final_labels = hard_labels.copy()
-        final_labels[uncertain_mask] = np.argmax(soft_assignments[uncertain_mask], axis=1)
+            soft_assignments[i, mapped_labels[i]] = 1.0
+        final_mapped = mapped_labels.copy()
+        final_mapped[uncertain_mask] = np.argmax(soft_assignments[uncertain_mask], axis=1)
+        idx_to_label = {i: l for l, i in label_to_idx.items()}
+        final_labels = np.array([idx_to_label[m] for m in final_mapped])
         return final_labels, confidence
 
     def select_resolution(self, z, adjacency=None, logvar=None):
