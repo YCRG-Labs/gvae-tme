@@ -26,9 +26,9 @@ DATASETS = {
     'melanoma': {'path': 'data/processed/melanoma.h5ad', 'has_spatial': False},
     'breast': {'path': 'data/processed/breast.h5ad', 'has_spatial': False},
     'colorectal': {'path': 'data/processed/colorectal.h5ad', 'has_spatial': True, 'r_spatial': 24.0},
-    'nsclc_scrna': {'path': 'data/processed/nsclc_scrna.h5ad', 'has_spatial': False},
-    'nsclc_visium': {'path': 'data/processed/nsclc_visium.h5ad', 'has_spatial': True, 'r_spatial': 24.0},
-    'nsclc_ici': {'path': 'data/processed/nsclc_ici.h5ad', 'has_spatial': False},
+    'nsclc_scrna': {'path': 'data/processed/nsclc_scrna.h5ad', 'has_spatial': False, 'epochs_phase1': 500, 'epochs_phase2': 300},
+    'nsclc_visium': {'path': 'data/processed/nsclc_visium.h5ad', 'has_spatial': True, 'r_spatial': 24.0, 'epochs_phase1': 500, 'epochs_phase2': 300},
+    'nsclc_ici': {'path': 'data/processed/nsclc_ici.h5ad', 'has_spatial': False, 'epochs_phase1': 500, 'epochs_phase2': 300},
 }
 
 def load_real_data(dataset_name, n_hvg=2000, max_cells=None):
@@ -612,6 +612,11 @@ def main():
 
     if args.ablation:
         config = apply_ablation(config, args.ablation)
+
+    if args.data in DATASETS:
+        dataset_overrides = {k: v for k, v in DATASETS[args.data].items()
+                             if k in ('epochs_phase1', 'epochs_phase2')}
+        config.update(dataset_overrides)
 
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size

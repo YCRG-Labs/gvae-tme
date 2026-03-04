@@ -529,6 +529,10 @@ def main():
     args = parser.parse_args()
 
     config = CONFIGS[args.config].copy()
+    if args.data in DATASETS:
+        dataset_overrides = {k: v for k, v in DATASETS[args.data].items()
+                             if k in ('epochs_phase1', 'epochs_phase2')}
+        config.update(dataset_overrides)
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
 
