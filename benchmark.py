@@ -230,7 +230,8 @@ def run_benchmark_cv(args, config):
                 trainer.train(data)
 
                 model.eval()
-                train_z = model(data.to(fold_config['device']))['z'].detach().cpu().numpy()
+                with torch.no_grad():
+                    train_z = model(data.to(fold_config['device']))['z'].cpu().numpy()
                 train_labels_obj = ClusteringAnalyzer()
                 best_res, _ = train_labels_obj.select_resolution(train_z)
                 train_labels, _ = train_labels_obj.cluster(train_z, resolution=best_res)
