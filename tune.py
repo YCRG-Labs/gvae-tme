@@ -72,20 +72,29 @@ def objective(trial, base_config, data, device, adata=None, has_spatial=True, gr
             return float('inf')
         raise
 
-    val = trainer.evaluate(trial_data.to(device))
     model.eval()
+    data_dev = trial_data.to(device)
+    rng_state = torch.random.get_rng_state()
+    torch.manual_seed(0)
     with torch.no_grad():
-        data_dev = trial_data.to(device)
         outputs = model(data_dev)
         loss_fn = GVAELoss()
+        x_raw = data_dev.x_raw if hasattr(data_dev, 'x_raw') else data_dev.x
+        L_adj = loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores']).item()
+        if 'expr_mu' in outputs:
+            L_expr = loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar']).item()
+        else:
+            L_expr = loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi']).item()
         L_kl = loss_fn.kl_divergence(outputs['mu'], outputs['logvar']).item()
         L_contrast = 0.0
         if hasattr(data_dev, 'pos_pairs') and hasattr(data_dev, 'neg_pairs'):
             if data_dev.pos_pairs.size(0) > 0 and data_dev.neg_pairs.size(0) > 0:
                 L_contrast = loss_fn.contrastive(
-                    outputs['z'], data_dev.pos_pairs, data_dev.neg_pairs).item()
-    val_loss = (val['loss_adj'] +
-                config['lambda1'] * val['loss_expr'] +
+                    outputs['z'], data_dev.pos_pairs, data_dev.neg_pairs,
+                    temperature=config.get('temperature', 0.1)).item()
+    torch.random.set_rng_state(rng_state)
+    val_loss = (L_adj +
+                config['lambda1'] * L_expr +
                 config['lambda2'] * L_contrast +
                 config['beta'] * L_kl)
     return val_loss
@@ -128,7 +137,25 @@ def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3,
         trainer = Trainer(model, config, device=device, checkpoint_dir=retrain_dir)
         phase1 = trainer.train(trial_data)
         val = trainer.evaluate(trial_data.to(device))
-        val_loss = val['loss_adj'] + config['lambda1'] * val['loss_expr']
+        model.eval()
+        rng_state = torch.random.get_rng_state()
+        torch.manual_seed(0)
+        with torch.no_grad():
+            data_dev = trial_data.to(device)
+            outputs = model(data_dev)
+            loss_fn = GVAELoss()
+            L_kl = loss_fn.kl_divergence(outputs['mu'], outputs['logvar']).item()
+            L_contrast = 0.0
+            if hasattr(data_dev, 'pos_pairs') and hasattr(data_dev, 'neg_pairs'):
+                if data_dev.pos_pairs.size(0) > 0 and data_dev.neg_pairs.size(0) > 0:
+                    L_contrast = loss_fn.contrastive(
+                        outputs['z'], data_dev.pos_pairs, data_dev.neg_pairs,
+                        temperature=config.get('temperature', 0.1)).item()
+        torch.random.set_rng_state(rng_state)
+        val_loss = (val['loss_adj'] +
+                    config['lambda1'] * val['loss_expr'] +
+                    config['lambda2'] * L_contrast +
+                    config['beta'] * L_kl)
 
         results.append({
             'rank': i,

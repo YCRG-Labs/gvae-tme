@@ -32,7 +32,7 @@ def _build_molecular_graph(pca, k=15):
         nbrs = NearestNeighbors(n_neighbors=k + 1, algorithm='auto')
         nbrs.fit(pca)
         dists, idxs = nbrs.kneighbors(pca)
-    sigma = float(np.median(dists[:, -1]))
+    sigma = max(float(np.median(dists[:, -1])), 1e-8)
     src = np.repeat(np.arange(n), k)
     dst = idxs[:, 1:].ravel()
     d = dists[:, 1:].ravel()
@@ -155,10 +155,13 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
         spatial_weight = torch.zeros_like(mol_weight)
         pos_pairs = torch.zeros((0, 2), dtype=torch.long)
         neg_pairs = torch.zeros((0, 2), dtype=torch.long)
-    raw_X = adata.X
+    if 'counts' in adata.layers:
+        raw_X = adata.layers['counts']
+    else:
+        raw_X = adata.X
     library_size = torch.tensor(np.asarray(raw_X.sum(axis=1)).flatten(), dtype=torch.float32)
     x_raw = torch.tensor(raw_X.toarray() if hasattr(raw_X, 'toarray') else np.asarray(raw_X), dtype=torch.float32)
-    data = Data(x=x, edge_index=edge_index, mol_weight=mol_weight, spatial_weight=spatial_weight, coords=coords_t, library_size=library_size, x_raw=x_raw, pos_pairs=pos_pairs, neg_pairs=neg_pairs)
+    data = Data(x=x, edge_index=edge_index, mol_weight=mol_weight, spatial_weight=spatial_weight, coords=coords_t, library_size=library_size, x_raw=x_raw, pos_pairs=pos_pairs, neg_pairs=neg_pairs, has_spatial_flag=has_spatial)
     if 'response' in adata.obs.columns and 'patient_id' in adata.obs.columns:
         patient_ids = adata.obs['patient_id'].values
         unique_pids = np.unique(patient_ids)
@@ -234,6 +237,7 @@ class SplatterSimulator:
             adata.obsm['spatial'] = coords
 
             sc.pp.filter_genes(adata, min_cells=3)
+            adata.layers['counts'] = adata.X.copy()
             sc.pp.normalize_total(adata, target_sum=10000)
             sc.pp.log1p(adata)
             n_top = min(2000, adata.n_vars)
@@ -281,6 +285,7 @@ def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10, n_cell_type
     adata.obsm['spatial'] = coords
     sc.pp.filter_cells(adata, min_genes=10)
     sc.pp.filter_genes(adata, min_cells=3)
+    adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     n_top = min(1000, adata.n_vars)

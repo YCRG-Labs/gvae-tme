@@ -144,6 +144,8 @@ class AttentionPooling(nn.Module):
         self.w = nn.Parameter(torch.randn(latent_dim) * 0.01)
 
     def forward(self, z, mask):
+        if not mask.any():
+            return torch.zeros(z.size(1), device=z.device), torch.zeros(z.size(0), device=z.device)
         scores = torch.tanh(self.W(z)) @ self.w
         scores = scores.masked_fill(~mask, float('-inf'))
         attn = F.softmax(scores, dim=0)
@@ -215,7 +217,7 @@ class GVAEModel(nn.Module):
     def forward(self, data):
         x = data.x
         edge_index = data.edge_index
-        has_spatial = data.spatial_weight.any().item()
+        has_spatial = getattr(data, 'has_spatial_flag', data.spatial_weight.any().item())
         if has_spatial:
             hybrid_weight, gate_values = self.compute_hybrid_weights(x, data.mol_weight, data.spatial_weight, edge_index)
         else:

@@ -239,6 +239,7 @@ class Trainer:
                 self.save_checkpoint(f"phase1_epoch{epoch}")
         if hasattr(self, '_best_state'):
             self.model.load_state_dict(self._best_state)
+            del self._best_state
         final_val = self.evaluate(data)
         self.phase1_metrics = {'loss_adj': float(final_val['loss_adj']), 'loss_expr': float(final_val['loss_expr'])}
         print(f"Phase 1 complete: L_adj={final_val['loss_adj']:.4f}, L_expr={final_val['loss_expr']:.4f}")
@@ -289,6 +290,7 @@ class Trainer:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
+                    self._best_state_p2 = {k: v.clone() for k, v in self.model.state_dict().items()}
                 else:
                     patience_counter += 1
                 if patience_counter >= self.patience // 10:
@@ -296,6 +298,9 @@ class Trainer:
                     break
             if epoch % self.checkpoint_every == 0:
                 self.save_checkpoint(f"phase2_epoch{epoch}")
+        if hasattr(self, '_best_state_p2'):
+            self.model.load_state_dict(self._best_state_p2)
+            del self._best_state_p2
         if self.freeze_encoder:
             self.model.encoder.requires_grad_(True)
             self.model.gate.requires_grad_(True)

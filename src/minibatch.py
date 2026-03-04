@@ -49,6 +49,12 @@ class MiniBatchTrainer(Trainer):
         z_all[idx_cat] = z_cat
         return z_all
 
+    def _ensure_pred_optimizer(self):
+        if not hasattr(self, '_pred_optimizer') or self._pred_optimizer is None:
+            import torch.optim as optim
+            self._pred_optimizer = optim.Adam(
+                self.model.predictor.parameters(), lr=self.lr_phase2)
+
     def _train_predictor_step(self, data):
         z_full = self._collect_embeddings(data)
         self.model.predictor.train()
@@ -63,10 +69,11 @@ class MiniBatchTrainer(Trainer):
             L_pred = self.loss_fn.prediction(y_train, pred_train)
         else:
             L_pred = self.loss_fn.prediction(data.y.to(self.device), y_pred)
-        self.optimizer.zero_grad()
+        self._ensure_pred_optimizer()
+        self._pred_optimizer.zero_grad()
         (self.gamma * L_pred).backward()
-        clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-        self.optimizer.step()
+        clip_grad_norm_(self.model.predictor.parameters(), self.max_grad_norm)
+        self._pred_optimizer.step()
         return L_pred.item()
 
     def train_epoch(self, data, phase=1, epoch=1):
@@ -89,7 +96,7 @@ class MiniBatchTrainer(Trainer):
             self.optimizer.step()
 
             for k in epoch_losses:
-                epoch_losses[k] += losses[k] if k == 'total' else losses.get(k, 0)
+                epoch_losses[k] += losses[k].item() if k == 'total' else losses.get(k, 0)
             n_batches += 1
 
         self.model.use_predictor = orig_pred
@@ -104,14 +111,15 @@ class MiniBatchTrainer(Trainer):
         return epoch_losses
 
     def _compute_batch_loss(self, outputs, batch, phase, epoch):
+        n_seed = batch.batch_size
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
-        x_raw = batch.x_raw if hasattr(batch, 'x_raw') else batch.x
+        x_raw = batch.x_raw[:n_seed] if hasattr(batch, 'x_raw') else batch.x[:n_seed]
         if 'expr_mu' in outputs:
-            L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar'])
+            L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'][:n_seed], outputs['expr_logvar'][:n_seed])
         else:
-            L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
+            L_expr = self.loss_fn.zinb(x_raw, outputs['rho'][:n_seed], outputs['theta'], outputs['pi'][:n_seed])
         beta = self.get_beta(epoch) if phase == 1 else self.beta_target
-        L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'])
+        L_kl = self.loss_fn.kl_divergence(outputs['mu'][:n_seed], outputs['logvar'][:n_seed])
 
         total = L_adj + self.lambda1 * L_expr + beta * L_kl
         return {
@@ -140,12 +148,13 @@ class MiniBatchTrainer(Trainer):
         for batch in loader:
             batch = batch.to(self.device)
             outputs = self.model(batch)
+            n_seed = batch.batch_size
             L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
-            x_raw = batch.x_raw if hasattr(batch, 'x_raw') else batch.x
+            x_raw = batch.x_raw[:n_seed] if hasattr(batch, 'x_raw') else batch.x[:n_seed]
             if 'expr_mu' in outputs:
-                L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'], outputs['expr_logvar'])
+                L_expr = self.loss_fn.gaussian(x_raw, outputs['expr_mu'][:n_seed], outputs['expr_logvar'][:n_seed])
             else:
-                L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
+                L_expr = self.loss_fn.zinb(x_raw, outputs['rho'][:n_seed], outputs['theta'], outputs['pi'][:n_seed])
             total_adj += L_adj.item()
             total_expr += L_expr.item()
             n_batches += 1
@@ -206,6 +215,7 @@ class MiniBatchTrainer(Trainer):
                 self.save_checkpoint(f"phase1_epoch{epoch}")
         if hasattr(self, '_best_state'):
             self.model.load_state_dict(self._best_state)
+            del self._best_state
         final_val = self.evaluate(data)
         self.phase1_metrics = {'loss_adj': float(final_val['loss_adj']),
                                'loss_expr': float(final_val['loss_expr'])}
@@ -222,6 +232,7 @@ class MiniBatchTrainer(Trainer):
             self.model.gate.requires_grad_(False)
         self.gamma = self.gamma_phase2
         self.setup_optimizer(phase=2)
+        self._pred_optimizer = None
         best_val_loss = float('inf')
         patience_counter = 0
         gamma_reductions = 0
@@ -251,6 +262,7 @@ class MiniBatchTrainer(Trainer):
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
+                    self._best_state_p2 = {k: v.clone() for k, v in self.model.state_dict().items()}
                 else:
                     patience_counter += 1
                 if patience_counter >= self.patience // 10:
@@ -258,6 +270,9 @@ class MiniBatchTrainer(Trainer):
                     break
             if epoch % self.checkpoint_every == 0:
                 self.save_checkpoint(f"phase2_epoch{epoch}")
+        if hasattr(self, '_best_state_p2'):
+            self.model.load_state_dict(self._best_state_p2)
+            del self._best_state_p2
         if self.freeze_encoder:
             self.model.encoder.requires_grad_(True)
             self.model.gate.requires_grad_(True)

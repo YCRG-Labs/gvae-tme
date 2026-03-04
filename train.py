@@ -472,7 +472,9 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         train_val_resp = patient_responses[train_val_idx]
 
         n_val = max(1, len(train_val_pids) // 5)
-        val_skf = StratifiedKFold(n_splits=max(2, len(train_val_pids) // n_val), shuffle=True, random_state=42 + fold)
+        min_class_count = int(min(np.bincount(train_val_resp.astype(int))))
+        n_splits_inner = max(2, min(len(train_val_pids) // max(n_val, 1), min_class_count))
+        val_skf = StratifiedKFold(n_splits=n_splits_inner, shuffle=True, random_state=42 + fold)
         inner_train_idx, inner_val_idx = next(val_skf.split(train_val_pids, train_val_resp))
         train_pids = set(train_val_pids[inner_train_idx])
         val_pids = set(train_val_pids[inner_val_idx])

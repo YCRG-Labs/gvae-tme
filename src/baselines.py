@@ -200,16 +200,22 @@ class CrossDatasetTransfer:
         target_ad = target_adata[:, shared_genes].copy()
         source_ad = source_adata[:, shared_genes].copy()
 
-        n_comps = min(50, target_ad.n_obs - 1, target_ad.n_vars - 1)
-        sc.pp.pca(target_ad, n_comps=n_comps)
-
         source_input_dim = config.get('input_dim', 50)
-        target_pca = target_ad.obsm['X_pca']
+        n_comps = min(source_input_dim, target_ad.n_obs - 1, target_ad.n_vars - 1)
+
+        from sklearn.decomposition import PCA as SkPCA
+        X_source = source_ad.X.toarray() if hasattr(source_ad.X, 'toarray') else np.asarray(source_ad.X)
+        pca_fit = SkPCA(n_components=n_comps).fit(X_source)
+        X_target = target_ad.X.toarray() if hasattr(target_ad.X, 'toarray') else np.asarray(target_ad.X)
+        target_pca = pca_fit.transform(X_target)
+
         if target_pca.shape[1] < source_input_dim:
             pad = np.zeros((target_pca.shape[0], source_input_dim - target_pca.shape[1]))
             target_ad.obsm['X_pca'] = np.hstack([target_pca, pad])
         elif target_pca.shape[1] > source_input_dim:
             target_ad.obsm['X_pca'] = target_pca[:, :source_input_dim]
+        else:
+            target_ad.obsm['X_pca'] = target_pca
 
         has_spatial = target_info.get('has_spatial', False)
         r_spatial = target_info.get('r_spatial', 82.5)
@@ -252,8 +258,13 @@ class CrossDatasetTransfer:
         results['rare_cells'] = {'n_rare': int(is_rare.sum())}
 
         if source_rare_markers and is_rare.sum() > 10:
-            target_markers = CrossDatasetAnalyzer.marker_genes(z, rare_labels, target_adata)
-            target_rare_markers = {k: v for k, v in target_markers.items()
+            unique_rare = np.unique(rare_labels[rare_labels >= 100])
+            if len(unique_rare) >= 2:
+                target_rare_markers = CrossDatasetAnalyzer.marker_genes_rare_subclusters(
+                    z, rare_labels, target_adata)
+            else:
+                target_rare_markers = {}
+            target_rare_markers = {k: v for k, v in target_rare_markers.items()
                                    if k.isdigit() and int(k) >= 100}
             if target_rare_markers:
                 concordance = CrossDatasetAnalyzer.jaccard_concordance(

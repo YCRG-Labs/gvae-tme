@@ -35,9 +35,11 @@ def apply_ablation(config, ablation_name):
 class LogisticRegressionBaseline:
 
     @staticmethod
-    def extract_features(z, cluster_labels, patient_masks):
+    def extract_features(z, cluster_labels, patient_masks, all_clusters=None):
         n_patients = len(patient_masks)
-        unique_clusters = np.unique(cluster_labels)
+        if all_clusters is None:
+            all_clusters = np.unique(cluster_labels)
+        unique_clusters = np.asarray(all_clusters)
         n_clusters = len(unique_clusters)
         cluster_map = {c: i for i, c in enumerate(unique_clusters)}
 
@@ -52,7 +54,8 @@ class LogisticRegressionBaseline:
 
             proportions = np.zeros(n_clusters)
             for c in cl_patient:
-                proportions[cluster_map[c]] += 1
+                if c in cluster_map:
+                    proportions[cluster_map[c]] += 1
             if n_cells > 0:
                 proportions /= n_cells
 

@@ -86,6 +86,10 @@ class ClusteringAnalyzer:
                 if not sp.issparse(adjacency):
                     adjacency = sp.csr_matrix(adjacency)
                 adata.obsp['connectivities'] = adjacency
+                adata.uns['neighbors'] = {
+                    'connectivities_key': 'connectivities',
+                    'params': {'method': 'custom'},
+                }
             else:
                 sc.pp.neighbors(adata, use_rep='X_latent', n_neighbors=15)
             sc.tl.leiden(adata, resolution=resolution)
@@ -485,14 +489,16 @@ class BiologicalValidation:
         I = (n / W) * (lag_sum / z_var)
         expected_I = -1.0 / (n - 1)
 
-        in_degree = np.zeros(n, dtype=float)
-        for i in range(n):
-            for j_idx in indices[i]:
-                in_degree[j_idx] += 1.0
-        out_degree = np.full(n, indices.shape[1], dtype=float)
+        import scipy.sparse as sp_sparse
+        rows = np.repeat(np.arange(n), indices.shape[1])
+        cols = indices.ravel().astype(int)
+        adj_sp = sp_sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+        n_mutual_directed = int(adj_sp.multiply(adj_sp.T).nnz)
+        in_degree = np.array(adj_sp.sum(axis=0)).flatten()
+        out_degree = np.array(adj_sp.sum(axis=1)).flatten()
         S2 = np.sum((out_degree + in_degree) ** 2)
         S0 = W
-        S1 = 2.0 * W
+        S1 = 0.5 * (n_mutual_directed + S0)
         n2 = n * n
         EI2 = (n2 * S1 - n * S2 + 3 * S0 * S0) / (S0 * S0 * (n2 - 1))
         var_I = EI2 - expected_I ** 2

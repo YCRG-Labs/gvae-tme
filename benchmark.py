@@ -183,7 +183,9 @@ def run_benchmark_cv(args, config):
         train_val_resp = patient_responses[train_val_idx]
 
         n_val = max(1, len(train_val_pids) // 5)
-        val_skf = StratifiedKFold(n_splits=max(2, len(train_val_pids) // n_val),
+        min_class_count = int(min(np.bincount(train_val_resp.astype(int))))
+        n_splits_inner = max(2, min(len(train_val_pids) // max(n_val, 1), min_class_count))
+        val_skf = StratifiedKFold(n_splits=n_splits_inner,
                                   shuffle=True, random_state=42 + fold)
         inner_train_idx, inner_val_idx = next(val_skf.split(train_val_pids, train_val_resp))
         train_pids = set(train_val_pids[inner_train_idx])
@@ -269,15 +271,16 @@ def run_benchmark_cv(args, config):
                     patient_responses[list(unique_pids).index(pid)]
                     for pid in tv_unique_pids if pid in train_pids
                 ])
+                all_clusters = np.unique(train_labels)
                 features_fit = LogisticRegressionBaseline.extract_features(
-                    train_z, train_labels, train_feat_masks)
+                    train_z, train_labels, train_feat_masks, all_clusters=all_clusters)
 
                 test_feat_masks = [
                     torch.tensor(test_patient_ids == pid, dtype=torch.bool)
                     for pid in test_pids_sorted
                 ]
                 features_test = LogisticRegressionBaseline.extract_features(
-                    test_z, test_labels, test_feat_masks)
+                    test_z, test_labels, test_feat_masks, all_clusters=all_clusters)
 
                 from sklearn.linear_model import LogisticRegression
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
@@ -321,10 +324,7 @@ def run_benchmark_cv(args, config):
                 knn_clf.fit(z_train, labels_train)
 
                 try:
-                    import scvi as _scvi
                     ad_test = adata[test_cell_mask].copy()
-                    _scvi.model.SCVI.setup_anndata(ad_test,
-                        layer='counts' if 'counts' in ad_test.layers else None)
                     z_test = scvi_model.get_latent_representation(ad_test)
                 except Exception:
                     n_comps = min(config.get('latent_dim', 32), ad_train.n_vars - 1)
@@ -344,8 +344,9 @@ def run_benchmark_cv(args, config):
                     torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
                     for pid in unique_pids if pid in train_pids or pid in val_pids
                 ]
+                all_clusters = np.unique(labels_train)
                 features_train = LogisticRegressionBaseline.extract_features(
-                    z_train, labels_train, train_masks)
+                    z_train, labels_train, train_masks, all_clusters=all_clusters)
                 z_all_test = z_test
                 labels_all_test = labels_test
                 test_feat_masks = [
@@ -353,7 +354,7 @@ def run_benchmark_cv(args, config):
                     for pid in test_pids_sorted
                 ]
                 features_test = LogisticRegressionBaseline.extract_features(
-                    z_all_test, labels_all_test, test_feat_masks)
+                    z_all_test, labels_all_test, test_feat_masks, all_clusters=all_clusters)
 
                 from sklearn.linear_model import LogisticRegression
                 train_resp = np.array([
@@ -365,7 +366,7 @@ def run_benchmark_cv(args, config):
                     for pid in unique_pids if pid in train_pids
                 ]
                 features_fit = LogisticRegressionBaseline.extract_features(
-                    z_train, labels_train, train_feat_masks)
+                    z_train, labels_train, train_feat_masks, all_clusters=all_clusters)
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
                                           random_state=42, C=1.0)
                 clf.fit(features_fit, train_resp)
@@ -393,19 +394,22 @@ def run_benchmark_cv(args, config):
                 knn_clf = KNeighborsClassifier(n_neighbors=15)
                 knn_clf.fit(z_train, labels_train)
 
-                from sklearn.decomposition import PCA as SkPCA
-                pca = SkPCA(n_components=n_comps).fit(
-                    ad_train.X.toarray() if hasattr(ad_train.X, 'toarray') else ad_train.X)
+                pca_loadings = ad_train.varm['PCs']
+                X_train_raw = ad_train.X.toarray() if hasattr(ad_train.X, 'toarray') else np.asarray(ad_train.X)
+                pca_mean = X_train_raw.mean(axis=0)
                 X_test = adata[test_cell_mask].X
                 if hasattr(X_test, 'toarray'):
                     X_test = X_test.toarray()
-                z_test = pca.transform(X_test)
+                else:
+                    X_test = np.asarray(X_test)
+                z_test = (X_test - pca_mean) @ pca_loadings
                 labels_test = knn_clf.predict(z_test)
 
                 train_val_patient_ids = patient_ids[train_val_mask]
                 test_patient_ids = patient_ids[test_cell_mask]
                 test_pids_sorted = sorted(test_pids)
 
+                all_clusters = np.unique(labels_train)
                 train_feat_masks = [
                     torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
                     for pid in unique_pids if pid in train_pids
@@ -415,14 +419,14 @@ def run_benchmark_cv(args, config):
                     for pid in unique_pids if pid in train_pids
                 ])
                 features_fit = LogisticRegressionBaseline.extract_features(
-                    z_train, labels_train, train_feat_masks)
+                    z_train, labels_train, train_feat_masks, all_clusters=all_clusters)
 
                 test_feat_masks = [
                     torch.tensor(test_patient_ids == pid, dtype=torch.bool)
                     for pid in test_pids_sorted
                 ]
                 features_test = LogisticRegressionBaseline.extract_features(
-                    z_test, labels_test, test_feat_masks)
+                    z_test, labels_test, test_feat_masks, all_clusters=all_clusters)
 
                 from sklearn.linear_model import LogisticRegression
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
