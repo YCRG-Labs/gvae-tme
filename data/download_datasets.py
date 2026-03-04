@@ -65,10 +65,12 @@ DOWNLOADS = {
         "accession": "GSE243013",
         "description": "Deng et al. 2025 -- NSCLC anti-PD-1 + chemo, 243 patients, MPR/non-MPR labels",
         "files": {
-            "raw_tar": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_RAW.tar",
-            "metadata": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_metadata.csv.gz",
+            "counts": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_NSCLC_immune_scRNA_counts.mtx.gz",
+            "metadata": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_NSCLC_immune_scRNA_metadata.csv.gz",
+            "barcodes": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_barcodes.csv.gz",
+            "genes": f"{GEO_BASE}/GSE243nnn/GSE243013/suppl/GSE243013_genes.csv.gz",
         },
-        "note": "Large download. Contains scRNA-seq from 243 NSCLC patients with immunotherapy response.",
+        "note": "Large download (~6.6 GB counts matrix). Contains scRNA-seq from 243 NSCLC patients with immunotherapy response.",
     },
 }
 
@@ -598,11 +600,11 @@ def download_nsclc_ici():
         fname = url.split("/")[-1]
         fpath = out_dir / fname
         if run_curl(url, fpath, key):
-            if fname.endswith(".gz"):
+            if key != "counts" and fname.endswith(".gz"):
                 decompress_gz(fpath)
 
 
-def process_nsclc_ici():
+def process_nsclc_ici(max_cells_per_patient=1000):
     print("\n=== Processing NSCLC ICI (GSE243013) into h5ad ===")
     raw_dir = RAW_DIR / "nsclc_ici"
 
@@ -611,6 +613,8 @@ def process_nsclc_ici():
         import anndata
         import numpy as np
         import pandas as pd
+        from scipy.sparse import csr_matrix, lil_matrix
+        import gc
         import warnings
         warnings.filterwarnings("ignore")
     except ImportError as e:
@@ -619,9 +623,21 @@ def process_nsclc_ici():
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    meta_path = raw_dir / "GSE243013_metadata.csv"
+    mtx_path = raw_dir / "GSE243013_NSCLC_immune_scRNA_counts.mtx.gz"
+    barcodes_path = raw_dir / "GSE243013_barcodes.csv"
+    genes_path = raw_dir / "GSE243013_genes.csv"
+    meta_path = raw_dir / "GSE243013_NSCLC_immune_scRNA_metadata.csv"
+
+    if not mtx_path.exists():
+        print("  [skip] Counts matrix not found. Run download first.")
+        return
+
+    if not barcodes_path.exists() or not genes_path.exists():
+        print("  [skip] Barcodes or genes file not found. Run download first.")
+        return
+
     if not meta_path.exists():
-        meta_gz = raw_dir / "GSE243013_metadata.csv.gz"
+        meta_gz = raw_dir / "GSE243013_NSCLC_immune_scRNA_metadata.csv.gz"
         if meta_gz.exists():
             decompress_gz(meta_gz, meta_path)
         else:
@@ -629,50 +645,193 @@ def process_nsclc_ici():
             return
 
     print("  Reading metadata...")
-    meta = pd.read_csv(meta_path)
-    print(f"  {len(meta)} cells in metadata")
+    meta = pd.read_csv(meta_path, low_memory=False)
+    print(f"  Metadata: {len(meta)} rows")
 
-    h5_files = sorted([f for f in os.listdir(raw_dir) if f.endswith(".h5")])
-    mtx_dirs = sorted([f for f in os.listdir(raw_dir)
-                       if (raw_dir / f / "matrix.mtx.gz").exists() or
-                          (raw_dir / f / "matrix.mtx").exists()])
+    print("  Reading barcodes and genes...")
+    barcodes = pd.read_csv(barcodes_path)
+    genes = pd.read_csv(genes_path)
+    barcode_list = barcodes.iloc[:, -1].astype(str).values
+    gene_list = genes.iloc[:, -1].astype(str).values
+    n_cells_total = len(barcode_list)
+    n_genes = len(gene_list)
+    print(f"  {n_cells_total} barcodes, {n_genes} genes")
 
-    adatas = []
-    if h5_files:
-        for fname in h5_files:
-            path = raw_dir / fname
-            print(f"  Reading {fname}...")
-            ad = sc.read_10x_h5(str(path))
-            ad.var_names_make_unique()
-            adatas.append(ad)
-    elif mtx_dirs:
-        for dname in mtx_dirs:
-            path = raw_dir / dname
-            print(f"  Reading {dname}/...")
-            ad = sc.read_10x_mtx(str(path), var_names="gene_symbols", cache=False)
-            adatas.append(ad)
+    barcode_to_idx = {b: i for i, b in enumerate(barcode_list)}
 
-    if not adatas:
-        print("  [skip] No expression files found. Download RAW tar and extract first.")
+    from scipy.sparse import save_npz, load_npz, coo_matrix
+    checkpoint_path = raw_dir / "nsclc_ici_checkpoint.npz"
+    barcodes_ckpt = raw_dir / "nsclc_ici_kept_barcodes.csv"
+    if checkpoint_path.exists() and barcodes_ckpt.exists():
+        print("  Loading from checkpoint (skipping MTX streaming)...")
+        X = load_npz(str(checkpoint_path))
+        kept_barcodes = pd.read_csv(barcodes_ckpt).iloc[:, 0].astype(str).values
+        print(f"  Loaded: {X.shape[0]} cells x {X.shape[1]} genes")
+
+        adata = anndata.AnnData(X=X, obs=pd.DataFrame(index=kept_barcodes), var=pd.DataFrame(index=gene_list))
+        del X
+        gc.collect()
+        adata.var_names_make_unique()
+        adata.obs_names_make_unique()
+
+        meta_indexed = meta.set_index('cellID')
+        transfer_cols = ['sampleID', 'major_cell_type', 'sub_cell_type',
+                         'gender', 'age', 'smoking_history', 'cancer_type',
+                         'pre_treatment_staging', 'anti-PD1_therapy', 'chemotherapy',
+                         'pathological_response', 'pathological_response_rate',
+                         'radiological_response']
+        for col in transfer_cols:
+            if col in meta_indexed.columns:
+                adata.obs[col] = meta_indexed.reindex(adata.obs_names)[col]
+        del meta, meta_indexed
+        gc.collect()
+
+        adata.obs['patient_id'] = adata.obs['sampleID']
+        resp_map = {'MPR': 'responder', 'pCR': 'responder', 'non-MPR': 'non-responder'}
+        adata.obs['response'] = adata.obs['pathological_response'].map(resp_map)
+        adata = adata[adata.obs['response'].notna()].copy()
+
+        print(f"  {adata.n_obs} cells, {adata.obs['patient_id'].nunique()} patients")
+        print(f"  Response: {dict(adata.obs['response'].value_counts())}")
+
+        print("  QC filtering...")
+        sc.pp.filter_cells(adata, min_genes=200)
+        sc.pp.filter_cells(adata, max_genes=6000)
+        sc.pp.filter_genes(adata, min_cells=3)
+        adata.var["mt"] = adata.var_names.str.startswith("MT-")
+        sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True)
+        adata = adata[adata.obs["pct_counts_mt"] < 20].copy()
+        print(f"  After QC: {adata.n_obs} cells x {adata.n_vars} genes")
+
+        adata = _run_scrublet(adata)
+
+        adata.layers['counts'] = adata.X.copy()
+        sc.pp.normalize_total(adata, target_sum=10000)
+        sc.pp.log1p(adata)
+        n_top = min(2000, adata.n_vars)
+        sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='cell_ranger')
+        sc.pp.scale(adata, max_value=10)
+        n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
+        sc.pp.pca(adata, n_comps=n_comps)
+
+        coords = np.random.randn(adata.n_obs, 2).astype(np.float32) * 100
+        adata.obsm["spatial"] = coords
+
+        out_path = PROCESSED_DIR / "nsclc_ici.h5ad"
+        adata.write(out_path)
+        print(f"  Saved: {out_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
+        print(f"  {adata.obs['patient_id'].nunique()} patients")
+        print(f"  Response: {dict(adata.obs['response'].value_counts())}")
         return
 
-    print(f"  Concatenating {len(adatas)} samples...")
-    adata = anndata.concat(adatas, join="outer", fill_value=0)
+    print(f"  Subsampling to {max_cells_per_patient} cells per patient...")
+    np.random.seed(42)
+    keep_cell_ids = []
+    for pid, grp in meta.groupby('sampleID'):
+        if len(grp) <= max_cells_per_patient:
+            keep_cell_ids.extend(grp['cellID'].values)
+        else:
+            keep_cell_ids.extend(grp['cellID'].sample(n=max_cells_per_patient, random_state=42).values)
+    print(f"  Selected {len(keep_cell_ids)} cells from {meta['sampleID'].nunique()} patients")
+
+    keep_set = set()
+    for cid in keep_cell_ids:
+        if cid in barcode_to_idx:
+            keep_set.add(barcode_to_idx[cid])
+    print(f"  {len(keep_set)} cells matched in barcode index")
+
+    old_to_new = {}
+    for new_idx, old_idx in enumerate(sorted(keep_set)):
+        old_to_new[old_idx] = new_idx
+    n_keep = len(old_to_new)
+    kept_barcodes = [barcode_list[old] for old in sorted(keep_set)]
+
+    print("  Streaming MTX file (filtering on the fly)...")
+    rows = []
+    cols = []
+    data = []
+    line_count = 0
+
+    open_fn = gzip.open if str(mtx_path).endswith('.gz') else open
+    with open_fn(str(mtx_path), 'rt') as f:
+        for line in f:
+            if line.startswith('%'):
+                continue
+            parts = line.strip().split()
+            if len(parts) == 3 and line_count == 0:
+                mtx_rows, mtx_cols, mtx_nnz = int(parts[0]), int(parts[1]), int(parts[2])
+                print(f"  MTX header: {mtx_rows} x {mtx_cols}, {mtx_nnz} nonzeros")
+                is_cells_rows = (mtx_rows == n_cells_total)
+                line_count += 1
+                continue
+
+            r, c, v = int(parts[0]) - 1, int(parts[1]) - 1, float(parts[2])
+            line_count += 1
+
+            if is_cells_rows:
+                cell_idx, gene_idx = r, c
+            else:
+                cell_idx, gene_idx = c, r
+
+            if cell_idx in old_to_new:
+                rows.append(old_to_new[cell_idx])
+                cols.append(gene_idx)
+                data.append(v)
+
+            if line_count % 100_000_000 == 0:
+                print(f"    {line_count / mtx_nnz * 100:.0f}% ({len(data)} kept entries)")
+
+    print(f"  Parsed {line_count - 1} entries, kept {len(data)}")
+
+    rows_arr = np.array(rows, dtype=np.int32)
+    cols_arr = np.array(cols, dtype=np.int32)
+    data_arr = np.array(data, dtype=np.float32)
+    del rows, cols, data
+    gc.collect()
+
+    from scipy.sparse import coo_matrix, save_npz, load_npz
+    X = coo_matrix((data_arr, (rows_arr, cols_arr)), shape=(n_keep, n_genes))
+    X = csr_matrix(X)
+    del rows_arr, cols_arr, data_arr
+    gc.collect()
+    print(f"  Sparse matrix: {X.shape}")
+
+    checkpoint_path = raw_dir / "nsclc_ici_checkpoint.npz"
+    save_npz(str(checkpoint_path), X)
+    pd.Series(kept_barcodes).to_csv(raw_dir / "nsclc_ici_kept_barcodes.csv", index=False)
+    print(f"  Saved checkpoint: {checkpoint_path}")
+
+    adata = anndata.AnnData(
+        X=X,
+        obs=pd.DataFrame(index=kept_barcodes),
+        var=pd.DataFrame(index=gene_list),
+    )
+    del X
+    gc.collect()
     adata.var_names_make_unique()
-    print(f"  Combined: {adata.n_obs} cells x {adata.n_vars} genes")
+    adata.obs_names_make_unique()
+    print(f"  AnnData: {adata.n_obs} cells x {adata.n_vars} genes")
 
-    if 'cell_barcode' in meta.columns:
-        common = adata.obs_names.intersection(meta['cell_barcode'])
-        if len(common) > 0:
-            meta_indexed = meta.set_index('cell_barcode')
-            for col in ['patient_id', 'response', 'therapy']:
-                if col in meta_indexed.columns:
-                    adata.obs[col] = meta_indexed.reindex(adata.obs_names)[col]
+    meta_indexed = meta.set_index('cellID')
+    transfer_cols = ['sampleID', 'major_cell_type', 'sub_cell_type',
+                     'gender', 'age', 'smoking_history', 'cancer_type',
+                     'pre_treatment_staging', 'anti-PD1_therapy', 'chemotherapy',
+                     'pathological_response', 'pathological_response_rate',
+                     'radiological_response']
+    for col in transfer_cols:
+        if col in meta_indexed.columns:
+            adata.obs[col] = meta_indexed.reindex(adata.obs_names)[col]
+    del meta, meta_indexed
+    gc.collect()
 
-    if 'response' not in adata.obs.columns:
-        resp_col = [c for c in meta.columns if 'response' in c.lower() or 'mpr' in c.lower()]
-        if resp_col:
-            print(f"  Found response column: {resp_col[0]}")
+    adata.obs['patient_id'] = adata.obs['sampleID']
+
+    resp_map = {'MPR': 'responder', 'pCR': 'responder', 'non-MPR': 'non-responder'}
+    adata.obs['response'] = adata.obs['pathological_response'].map(resp_map)
+    adata = adata[adata.obs['response'].notna()].copy()
+    print(f"  After dropping unknown response: {adata.n_obs} cells")
+    print(f"  Response: {dict(adata.obs['response'].value_counts())}")
+    print(f"  Patients: {adata.obs['patient_id'].nunique()}")
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=200)
@@ -688,9 +847,9 @@ def process_nsclc_ici():
     adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
-    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='cell_ranger')
+    sc.pp.scale(adata, max_value=10)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -700,11 +859,8 @@ def process_nsclc_ici():
     out_path = PROCESSED_DIR / "nsclc_ici.h5ad"
     adata.write(out_path)
     print(f"  Saved: {out_path} ({adata.n_obs} cells, {adata.n_vars} genes)")
-    if 'patient_id' in adata.obs.columns:
-        n_patients = adata.obs['patient_id'].nunique()
-        print(f"  {n_patients} patients")
-    if 'response' in adata.obs.columns:
-        print(f"  Response: {dict(adata.obs['response'].value_counts())}")
+    print(f"  {adata.obs['patient_id'].nunique()} patients")
+    print(f"  Response: {dict(adata.obs['response'].value_counts())}")
 
 
 def main():
