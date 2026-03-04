@@ -109,6 +109,7 @@ class Trainer:
         self.phase1_metrics = {}
         self.max_grad_norm = config.get('max_grad_norm', 1.0)
         self.temperature = config.get('temperature', 0.1)
+        self.checkpoint_every = config.get('checkpoint_every', 50)
         self.loss_fn = GVAELoss()
         self.optimizer = None
         self.scheduler = None
@@ -229,6 +230,8 @@ class Trainer:
                 if patience_counter >= self.patience // 10:
                     print(f"Early stopping at epoch {epoch}")
                     break
+            if epoch % self.checkpoint_every == 0:
+                self.save_checkpoint(f"phase1_epoch{epoch}")
         if hasattr(self, '_best_state'):
             self.model.load_state_dict(self._best_state)
         final_val = self.evaluate(data)
@@ -286,6 +289,8 @@ class Trainer:
                 if patience_counter >= self.patience // 10:
                     print(f"Early stopping at epoch {epoch}")
                     break
+            if epoch % self.checkpoint_every == 0:
+                self.save_checkpoint(f"phase2_epoch{epoch}")
         if self.freeze_encoder:
             self.model.encoder.requires_grad_(True)
             self.model.gate.requires_grad_(True)
