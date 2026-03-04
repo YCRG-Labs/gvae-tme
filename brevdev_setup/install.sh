@@ -42,7 +42,11 @@ import scanpy
 import anndata
 import optuna
 import scrublet
+import scvi
 from skmisc.loess import loess
+from src.baselines import ScVIBaseline, ScanpyBaseline, ImmunosuppressiveSignatures, CrossDatasetTransfer
+from src.analysis import CrossDatasetAnalyzer, BiologicalValidation
+import benchmark
 print('All imports OK')
 "
 

@@ -102,7 +102,14 @@ echo ""
 echo "=========================================="
 echo "  Experiments Complete"
 echo "=========================================="
-echo "All logs in outputs/"
+echo ""
+echo "=== Logs ==="
 ls -lh outputs/*.log 2>/dev/null
 echo ""
-echo "Check outputs/*/metrics.json for results"
+echo "=== Checkpoints ==="
+find outputs -name "*.pt" -exec ls -lh {} \; 2>/dev/null
+echo ""
+echo "=== Results ==="
+find outputs -name "*.json" -exec echo {} \; 2>/dev/null
+echo ""
+echo "Done."
