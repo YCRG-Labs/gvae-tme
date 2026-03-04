@@ -224,59 +224,148 @@ def run_benchmark_cv(args, config):
                 y_pred_test = y_pred_all[test_patient_idx]
 
             elif method == 'scvi':
-                ad_train = adata[np.isin(patient_ids,
-                    list(train_pids) + list(val_pids))].copy()
+                train_val_mask = np.isin(patient_ids,
+                    list(train_pids) + list(val_pids))
+                test_cell_mask = np.isin(patient_ids, list(test_pids))
+                ad_train = adata[train_val_mask].copy()
                 scvi_model, scvi_info = ScVIBaseline.train_and_embed(ad_train,
                     n_latent=config.get('latent_dim', 32))
                 if scvi_model is None:
                     method_folds[method].append({'auroc': 0.5, 'auprc': 0.5})
                     continue
 
-                z_all = scvi_model.get_latent_representation(adata)
+                z_train = scvi_info['z']
                 clusterer = ClusteringAnalyzer()
-                _, _ = clusterer.select_resolution(z_all)
-                labels, _ = clusterer.cluster(z_all)
+                best_res, _ = clusterer.select_resolution(z_train)
+                labels_train, _ = clusterer.cluster(z_train, resolution=best_res)
 
-                test_mask_bool = np.isin(patient_ids, list(test_pids))
-                patient_masks_all = [
-                    torch.tensor(patient_ids == pid, dtype=torch.bool)
-                    for pid in unique_pids
+                train_val_pids_list = list(train_pids) + list(val_pids)
+                train_val_patient_ids = patient_ids[train_val_mask]
+                train_masks = [
+                    torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
+                    for pid in unique_pids if pid in train_pids or pid in val_pids
                 ]
-                logreg = LogisticRegressionBaseline.extract_features(
-                    z_all, labels, patient_masks_all)
-                train_patient_mask = np.array([pid not in test_pids for pid in unique_pids])
-                test_patient_mask = np.array([pid in test_pids for pid in unique_pids])
+                train_only_mask = np.array([pid in train_pids for pid in unique_pids
+                                            if pid in train_pids or pid in val_pids])
+                test_only_mask = ~train_only_mask
+
+                from sklearn.neighbors import KNeighborsClassifier
+                knn_clf = KNeighborsClassifier(n_neighbors=15)
+                knn_clf.fit(z_train, labels_train)
+
+                try:
+                    import scvi as _scvi
+                    ad_test = adata[test_cell_mask].copy()
+                    _scvi.model.SCVI.setup_anndata(ad_test,
+                        layer='counts' if 'counts' in ad_test.layers else None)
+                    z_test = scvi_model.get_latent_representation(ad_test)
+                except Exception:
+                    n_comps = min(config.get('latent_dim', 32), ad_train.n_vars - 1)
+                    from sklearn.decomposition import PCA as SkPCA
+                    pca = SkPCA(n_components=n_comps).fit(ad_train.X.toarray()
+                        if hasattr(ad_train.X, 'toarray') else ad_train.X)
+                    X_test = adata[test_cell_mask].X
+                    if hasattr(X_test, 'toarray'):
+                        X_test = X_test.toarray()
+                    z_test = pca.transform(X_test)
+
+                labels_test = knn_clf.predict(z_test)
+
+                test_patient_ids = patient_ids[test_cell_mask]
+                test_pids_sorted = sorted(test_pids)
+                test_masks = [
+                    torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
+                    for pid in unique_pids if pid in train_pids or pid in val_pids
+                ]
+                features_train = LogisticRegressionBaseline.extract_features(
+                    z_train, labels_train, train_masks)
+                z_all_test = z_test
+                labels_all_test = labels_test
+                test_feat_masks = [
+                    torch.tensor(test_patient_ids == pid, dtype=torch.bool)
+                    for pid in test_pids_sorted
+                ]
+                features_test = LogisticRegressionBaseline.extract_features(
+                    z_all_test, labels_all_test, test_feat_masks)
 
                 from sklearn.linear_model import LogisticRegression
+                train_resp = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in unique_pids if pid in train_pids
+                ])
+                train_feat_masks = [
+                    torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
+                    for pid in unique_pids if pid in train_pids
+                ]
+                features_fit = LogisticRegressionBaseline.extract_features(
+                    z_train, labels_train, train_feat_masks)
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
                                           random_state=42, C=1.0)
-                clf.fit(logreg[train_patient_mask], patient_responses[train_patient_mask])
-                proba = clf.predict_proba(logreg[test_patient_mask])
-                y_test = patient_responses[test_patient_mask]
+                clf.fit(features_fit, train_resp)
+                proba = clf.predict_proba(features_test)
+                y_test = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in test_pids_sorted
+                ])
                 y_pred_test = proba[:, 1] if proba.shape[1] == 2 else np.full(len(y_test), 0.5)
 
             elif method == 'scanpy':
-                z_pca = adata.obsm['X_pca']
-                ad_temp = adata.copy()
-                sc.pp.neighbors(ad_temp, use_rep='X_pca', n_neighbors=15)
-                sc.tl.leiden(ad_temp, resolution=1.0)
-                labels = ad_temp.obs['leiden'].astype(int).values
+                train_val_mask = np.isin(patient_ids,
+                    list(train_pids) + list(val_pids))
+                test_cell_mask = np.isin(patient_ids, list(test_pids))
 
-                patient_masks_all = [
-                    torch.tensor(patient_ids == pid, dtype=torch.bool)
-                    for pid in unique_pids
+                ad_train = adata[train_val_mask].copy()
+                n_comps = min(50, ad_train.n_obs - 1, ad_train.n_vars - 1)
+                sc.pp.pca(ad_train, n_comps=n_comps)
+                sc.pp.neighbors(ad_train, use_rep='X_pca', n_neighbors=15)
+                sc.tl.leiden(ad_train, resolution=1.0)
+                z_train = ad_train.obsm['X_pca']
+                labels_train = ad_train.obs['leiden'].astype(int).values
+
+                from sklearn.neighbors import KNeighborsClassifier
+                knn_clf = KNeighborsClassifier(n_neighbors=15)
+                knn_clf.fit(z_train, labels_train)
+
+                from sklearn.decomposition import PCA as SkPCA
+                pca = SkPCA(n_components=n_comps).fit(
+                    ad_train.X.toarray() if hasattr(ad_train.X, 'toarray') else ad_train.X)
+                X_test = adata[test_cell_mask].X
+                if hasattr(X_test, 'toarray'):
+                    X_test = X_test.toarray()
+                z_test = pca.transform(X_test)
+                labels_test = knn_clf.predict(z_test)
+
+                train_val_patient_ids = patient_ids[train_val_mask]
+                test_patient_ids = patient_ids[test_cell_mask]
+                test_pids_sorted = sorted(test_pids)
+
+                train_feat_masks = [
+                    torch.tensor(train_val_patient_ids == pid, dtype=torch.bool)
+                    for pid in unique_pids if pid in train_pids
                 ]
-                features = LogisticRegressionBaseline.extract_features(
-                    z_pca, labels, patient_masks_all)
-                train_patient_mask = np.array([pid not in test_pids for pid in unique_pids])
-                test_patient_mask = np.array([pid in test_pids for pid in unique_pids])
+                train_resp = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in unique_pids if pid in train_pids
+                ])
+                features_fit = LogisticRegressionBaseline.extract_features(
+                    z_train, labels_train, train_feat_masks)
+
+                test_feat_masks = [
+                    torch.tensor(test_patient_ids == pid, dtype=torch.bool)
+                    for pid in test_pids_sorted
+                ]
+                features_test = LogisticRegressionBaseline.extract_features(
+                    z_test, labels_test, test_feat_masks)
 
                 from sklearn.linear_model import LogisticRegression
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
                                           random_state=42, C=1.0)
-                clf.fit(features[train_patient_mask], patient_responses[train_patient_mask])
-                proba = clf.predict_proba(features[test_patient_mask])
-                y_test = patient_responses[test_patient_mask]
+                clf.fit(features_fit, train_resp)
+                proba = clf.predict_proba(features_test)
+                y_test = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in test_pids_sorted
+                ])
                 y_pred_test = proba[:, 1] if proba.shape[1] == 2 else np.full(len(y_test), 0.5)
 
             else:
@@ -286,12 +375,12 @@ def run_benchmark_cv(args, config):
             method_folds[method].append(fold_metrics)
             print(f"  {method} fold {fold+1}: AUROC={fold_metrics['auroc']:.3f}")
 
-            for pid_name in test_pids:
+            test_pids_sorted = sorted(test_pids)
+            for pidx, pid_name in enumerate(test_pids_sorted):
                 idx = pid_to_idx[pid_name]
-                pidx_in_test = list(test_pids).index(pid_name) if method != 'gvae' else None
                 all_y_true[idx] = patient_responses[list(unique_pids).index(pid_name)]
-                if method != 'gvae' and pidx_in_test is not None and pidx_in_test < len(y_pred_test):
-                    method_y_pred[method][idx] = y_pred_test[pidx_in_test]
+                if pidx < len(y_pred_test):
+                    method_y_pred[method][idx] = y_pred_test[pidx]
 
     print(f"\n{'='*50}")
     print("Benchmark CV Results")
