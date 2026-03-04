@@ -42,8 +42,11 @@ import scanpy
 import anndata
 import optuna
 import scrublet
-import scvi
-from skmisc.loess import loess
+try:
+    import scvi
+    print(f'  scvi-tools: {scvi.__version__}')
+except ImportError:
+    print('  [warn] scvi-tools not installed, scVI baseline will be skipped')
 from src.baselines import ScVIBaseline, ScanpyBaseline, ImmunosuppressiveSignatures, CrossDatasetTransfer
 from src.analysis import CrossDatasetAnalyzer, BiologicalValidation
 import benchmark
