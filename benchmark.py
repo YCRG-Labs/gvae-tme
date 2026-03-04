@@ -195,18 +195,32 @@ def run_benchmark_cv(args, config):
 
             if method == 'gvae':
                 fold_config = config.copy()
-                if adata.n_obs > 50_000 and fold_config.get('batch_size') is None:
+                train_val_mask = np.isin(patient_ids,
+                    list(train_pids) + list(val_pids))
+                ad_train_val = adata[train_val_mask].copy()
+                n_comps = min(50, ad_train_val.n_obs - 1, ad_train_val.n_vars - 1)
+                sc.pp.pca(ad_train_val, n_comps=n_comps)
+
+                if ad_train_val.n_obs > 50_000 and fold_config.get('batch_size') is None:
                     fold_config['batch_size'] = 512
 
-                data = prepare_graph_data(adata, has_spatial=has_spatial, **graph_kwargs)
-                assign_patient_splits(data, sorted(train_pids), sorted(val_pids),
-                                     sorted(test_pids), unique_pids)
-                cell_train = np.array([pid in train_pids for pid in patient_ids])
-                cell_val = np.array([pid in val_pids for pid in patient_ids])
-                cell_test = np.array([pid in test_pids for pid in patient_ids])
+                data = prepare_graph_data(ad_train_val, has_spatial=has_spatial, **graph_kwargs)
+
+                tv_patient_ids = ad_train_val.obs['patient_id'].values
+                tv_unique_pids = np.unique(tv_patient_ids)
+                tv_pid_to_idx = {pid: i for i, pid in enumerate(tv_unique_pids)}
+
+                train_idx = [tv_pid_to_idx[p] for p in sorted(train_pids) if p in tv_pid_to_idx]
+                val_idx = [tv_pid_to_idx[p] for p in sorted(val_pids) if p in tv_pid_to_idx]
+                data.train_patient_idx = torch.tensor(train_idx, dtype=torch.long)
+                data.val_patient_idx = torch.tensor(val_idx, dtype=torch.long)
+                data.test_patient_idx = torch.tensor([], dtype=torch.long)
+
+                cell_train = np.array([pid in train_pids for pid in tv_patient_ids])
+                cell_val = np.array([pid in val_pids for pid in tv_patient_ids])
                 data.train_mask = torch.tensor(cell_train, dtype=torch.bool)
                 data.val_mask = torch.tensor(cell_val, dtype=torch.bool)
-                data.test_mask = torch.tensor(cell_test, dtype=torch.bool)
+                data.test_mask = torch.tensor(np.zeros(len(tv_patient_ids), dtype=bool))
 
                 model = build_model(fold_config, data, use_predictor=True)
                 trainer = make_trainer(model, fold_config, fold_config['device'],
@@ -214,14 +228,67 @@ def run_benchmark_cv(args, config):
                 trainer.train(data)
 
                 model.eval()
-                data_eval = data.to(fold_config['device'])
+                train_z = model(data.to(fold_config['device']))['z'].detach().cpu().numpy()
+                train_labels_obj = ClusteringAnalyzer()
+                best_res, _ = train_labels_obj.select_resolution(train_z)
+                train_labels, _ = train_labels_obj.cluster(train_z, resolution=best_res)
+
+                from sklearn.decomposition import PCA as SkPCA
+                X_tv = ad_train_val.X
+                if hasattr(X_tv, 'toarray'):
+                    X_tv = X_tv.toarray()
+                pca_fit = SkPCA(n_components=n_comps).fit(X_tv)
+
+                test_cell_mask = np.isin(patient_ids, list(test_pids))
+                X_test = adata[test_cell_mask].X
+                if hasattr(X_test, 'toarray'):
+                    X_test = X_test.toarray()
+                test_pca = pca_fit.transform(X_test)
+
+                ad_test = adata[test_cell_mask].copy()
+                ad_test.obsm['X_pca'] = test_pca
+                test_data = prepare_graph_data(ad_test, has_spatial=has_spatial, **graph_kwargs)
+
                 with torch.no_grad():
-                    outputs = model(data_eval)
-                y_all = data_eval.y.cpu().numpy()
-                y_pred_all = outputs['y_pred'].detach().cpu().numpy()
-                test_patient_idx = data_eval.test_patient_idx.cpu().numpy()
-                y_test = y_all[test_patient_idx]
-                y_pred_test = y_pred_all[test_patient_idx]
+                    test_outputs = model(test_data.to(fold_config['device']))
+                test_z = test_outputs['z'].cpu().numpy()
+
+                from sklearn.neighbors import KNeighborsClassifier
+                knn_clf = KNeighborsClassifier(n_neighbors=15)
+                knn_clf.fit(train_z, train_labels)
+                test_labels = knn_clf.predict(test_z)
+
+                test_patient_ids = patient_ids[test_cell_mask]
+                test_pids_sorted = sorted(test_pids)
+
+                train_feat_masks = [
+                    torch.tensor(tv_patient_ids == pid, dtype=torch.bool)
+                    for pid in tv_unique_pids if pid in train_pids
+                ]
+                train_resp = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in tv_unique_pids if pid in train_pids
+                ])
+                features_fit = LogisticRegressionBaseline.extract_features(
+                    train_z, train_labels, train_feat_masks)
+
+                test_feat_masks = [
+                    torch.tensor(test_patient_ids == pid, dtype=torch.bool)
+                    for pid in test_pids_sorted
+                ]
+                features_test = LogisticRegressionBaseline.extract_features(
+                    test_z, test_labels, test_feat_masks)
+
+                from sklearn.linear_model import LogisticRegression
+                clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
+                                          random_state=42, C=1.0)
+                clf.fit(features_fit, train_resp)
+                proba = clf.predict_proba(features_test)
+                y_test = np.array([
+                    patient_responses[list(unique_pids).index(pid)]
+                    for pid in test_pids_sorted
+                ])
+                y_pred_test = proba[:, 1] if proba.shape[1] == 2 else np.full(len(y_test), 0.5)
 
             elif method == 'scvi':
                 train_val_mask = np.isin(patient_ids,
