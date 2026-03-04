@@ -402,6 +402,37 @@ class CrossDatasetAnalyzer:
         return markers
 
     @staticmethod
+    def marker_genes_rare_subclusters(z, rare_labels, adata, n_markers=50):
+        rare_mask = rare_labels >= 100
+        if rare_mask.sum() < 10:
+            return {}
+        unique_rare = np.unique(rare_labels[rare_mask])
+        if len(unique_rare) < 2:
+            return {}
+
+        ad = adata[rare_mask].copy()
+        ad.obs['rare_subcluster'] = pd.Categorical(rare_labels[rare_mask].astype(str))
+        ad.obsm['X_latent'] = z[rare_mask]
+
+        sc.tl.rank_genes_groups(ad, groupby='rare_subcluster', method='wilcoxon',
+                                n_genes=n_markers, use_raw=False)
+        markers = {}
+        for cl in unique_rare:
+            names = ad.uns['rank_genes_groups']['names'][str(cl)]
+            pvals = ad.uns['rank_genes_groups']['pvals_adj'][str(cl)]
+            logfcs = ad.uns['rank_genes_groups']['logfoldchanges'][str(cl)]
+            filtered = []
+            for g, p, lfc in zip(names, pvals, logfcs):
+                if p < 0.01 and abs(lfc) > 1.0:
+                    filtered.append(g)
+                if len(filtered) >= n_markers:
+                    break
+            if len(filtered) < 5:
+                filtered = list(names[:n_markers])
+            markers[str(cl)] = filtered
+        return markers
+
+    @staticmethod
     def jaccard_concordance(markers_a, markers_b):
         pairs = {}
         for cl_a, genes_a in markers_a.items():
@@ -521,6 +552,38 @@ class BiologicalValidation:
                 results[cluster_id] = top.to_dict('records')
             except Exception as e:
                 results[cluster_id] = {'error': str(e)}
+        return results
+
+    @staticmethod
+    def gsea_rare_subclusters(rare_marker_genes, organism='Human'):
+        if not rare_marker_genes:
+            return {'note': 'No rare subcluster markers provided'}
+        try:
+            import gseapy as gp
+        except ImportError:
+            return {'note': 'gseapy not installed. Install via: pip install gseapy'}
+
+        gene_set_libs = ['MSigDB_Hallmark_2020', 'GO_Biological_Process_2023',
+                         'KEGG_2021_Human']
+        results = {}
+        for cluster_id, genes in rare_marker_genes.items():
+            if not genes:
+                continue
+            cluster_results = {}
+            for lib in gene_set_libs:
+                try:
+                    enr = gp.enrichr(
+                        gene_list=genes,
+                        gene_sets=lib,
+                        organism=organism,
+                        outdir=None,
+                        no_plot=True,
+                    )
+                    top = enr.results.head(10)[['Term', 'Adjusted P-value', 'Combined Score']]
+                    cluster_results[lib] = top.to_dict('records')
+                except Exception as e:
+                    cluster_results[lib] = {'error': str(e)}
+            results[cluster_id] = cluster_results
         return results
 
     @staticmethod

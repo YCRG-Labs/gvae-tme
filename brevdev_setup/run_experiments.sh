@@ -73,6 +73,33 @@ fi
 
 echo ""
 echo "=========================================="
+echo "  5. Benchmark: Head-to-Head Comparison"
+echo "=========================================="
+if [ -f "data/processed/melanoma.h5ad" ]; then
+    echo "--- Benchmark CV: Melanoma (GVAE vs scVI vs Scanpy) ---"
+    python3 benchmark.py --config full --data melanoma --methods gvae,scvi,scanpy --cv \
+        2>&1 | tee outputs/melanoma_benchmark.log
+fi
+
+if [ -f "data/processed/nsclc_ici.h5ad" ]; then
+    echo ""
+    echo "--- Benchmark CV: NSCLC ICI (GVAE vs scVI vs Scanpy) ---"
+    python3 benchmark.py --config full --data nsclc_ici --methods gvae,scvi,scanpy --batch-size 512 --cv \
+        2>&1 | tee outputs/nsclc_ici_benchmark.log
+fi
+
+echo ""
+echo "=========================================="
+echo "  6. Cross-Dataset Transfer"
+echo "=========================================="
+if [ -f "data/processed/melanoma.h5ad" ] && [ -f "data/processed/nsclc_ici.h5ad" ]; then
+    echo "--- Transfer: Melanoma -> NSCLC ICI ---"
+    python3 benchmark.py --config full --transfer-source melanoma --transfer-target nsclc_ici \
+        2>&1 | tee outputs/melanoma_to_nsclc_transfer.log
+fi
+
+echo ""
+echo "=========================================="
 echo "  Experiments Complete"
 echo "=========================================="
 echo "All logs in outputs/"

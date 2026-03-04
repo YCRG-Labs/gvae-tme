@@ -25,3 +25,5 @@ scrublet>=0.2.3
 # rpy2>=3.5
 # Optional: h5py for Visium HD feature slice reading
 # h5py>=3.8
+# Optional: scvi-tools for scVI benchmark baseline
+# scvi-tools>=1.0

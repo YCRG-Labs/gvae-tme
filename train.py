@@ -20,6 +20,7 @@ from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyz
 from src.data_utils import prepare_graph_data, create_synthetic_data, SplatterSimulator
 from src.config import CONFIGS
 from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
+from src.baselines import ImmunosuppressiveSignatures
 
 DATASETS = {
     'melanoma': {'path': 'data/processed/melanoma.h5ad', 'has_spatial': False},
@@ -170,6 +171,31 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     except Exception as e:
         print(f"  [warn] Marker/GSEA/LR analysis: {e}")
 
+    rare_marker_results = {}
+    rare_gsea_results = {}
+    signature_results = {}
+    try:
+        unique_rare = np.unique(rare_labels[rare_labels >= 100])
+        if is_rare.sum() > 10 and len(unique_rare) >= 2:
+            rare_marker_results = CrossDatasetAnalyzer.marker_genes_rare_subclusters(
+                z, rare_labels, adata)
+            if rare_marker_results:
+                rare_gsea_results = BiologicalValidation.gsea_rare_subclusters(
+                    rare_marker_results)
+                if rare_gsea_results and not rare_gsea_results.get('note'):
+                    n_enriched = sum(1 for v in rare_gsea_results.values()
+                                     if isinstance(v, dict) and 'error' not in str(v))
+                    print(f"Rare GSEA: {n_enriched}/{len(rare_gsea_results)} subclusters enriched")
+        signature_results = ImmunosuppressiveSignatures.compare_rare_vs_nonrare(adata, is_rare)
+        if isinstance(signature_results, dict) and 'note' not in signature_results:
+            for sig_name, sig_data in signature_results.items():
+                if isinstance(sig_data, dict) and 'rare_mean' in sig_data:
+                    print(f"  {sig_name}: rare={sig_data['rare_mean']:.3f}, "
+                          f"nonrare={sig_data['nonrare_mean']:.3f}, "
+                          f"p={sig_data['p_value']:.4f}")
+    except Exception as e:
+        print(f"  [warn] Rare subcluster validation: {e}")
+
     batch_metrics = {}
     if 'patient_id' in adata.obs.columns:
         batch_labels = adata.obs['patient_id'].values
@@ -273,7 +299,10 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         'batch_mixing': batch_metrics,
         'rare_cells': {'n_rare': int(is_rare.sum()),
                        'threshold': config.get('rare_threshold', 2.0),
-                       'method': rare_method},
+                       'method': rare_method,
+                       'rare_markers': rare_marker_results,
+                       'rare_gsea': rare_gsea_results,
+                       'immunosuppressive_signatures': signature_results},
         'spatial_validation': spatial_metrics,
         'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
         'logreg_baseline': logreg_results,

@@ -18,7 +18,7 @@ pip install -r requirements.txt
 
 echo ""
 echo "=== Installing optional dependencies ==="
-pip install scikit-misc annoy gseapy celltypist scrublet h5py
+pip install scikit-misc annoy gseapy celltypist scrublet h5py scvi-tools
 
 echo ""
 echo "=== Verifying GPU ==="
