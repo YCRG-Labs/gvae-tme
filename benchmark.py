@@ -9,7 +9,7 @@ import json
 import anndata
 import scanpy as sc
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
 
 from src.model import GVAEModel
 from src.trainer import Trainer
@@ -586,14 +586,167 @@ def print_comparison_table(comparison, methods):
     print(f"{'='*70}")
 
 
+class SyntheticSpikeInExperiment:
+
+    TREG_MARKERS = ['FOXP3', 'IL2RA', 'CTLA4', 'IKZF2', 'TNFRSF18']
+    MDSC_MARKERS = ['S100A8', 'S100A9', 'S100A12', 'FCN1', 'VCAN']
+
+    @staticmethod
+    def inject_rare_population(adata, fraction=0.02, effect_size=2.0,
+                                markers=None, seed=42):
+        if markers is None:
+            markers = SyntheticSpikeInExperiment.TREG_MARKERS
+        ad = adata.copy()
+        rng = np.random.RandomState(seed)
+        n_spike = max(1, int(fraction * ad.n_obs))
+        spike_idx = rng.choice(ad.n_obs, n_spike, replace=False)
+
+        available = [g for g in markers if g in ad.var_names]
+        if available:
+            X = ad.X.toarray() if hasattr(ad.X, 'toarray') else np.asarray(ad.X)
+            for g in available:
+                g_idx = list(ad.var_names).index(g)
+                X[spike_idx, g_idx] += effect_size
+            ad.X = X
+            if 'counts' in ad.layers:
+                counts = ad.layers['counts']
+                if hasattr(counts, 'toarray'):
+                    counts = counts.toarray()
+                else:
+                    counts = np.asarray(counts).copy()
+                for g in available:
+                    g_idx = list(ad.var_names).index(g)
+                    counts[spike_idx, g_idx] = np.maximum(
+                        counts[spike_idx, g_idx],
+                        counts[:, g_idx].mean() * np.exp(effect_size))
+                ad.layers['counts'] = counts
+
+        gt_mask = np.zeros(ad.n_obs, dtype=bool)
+        gt_mask[spike_idx] = True
+        ad.obs['spike_in'] = gt_mask
+
+        n_comps = min(50, ad.n_obs - 1, ad.n_vars - 1)
+        sc.pp.pca(ad, n_comps=n_comps)
+
+        return ad, gt_mask
+
+    @staticmethod
+    def evaluate_recovery(predicted, ground_truth):
+        return {
+            'precision': float(precision_score(ground_truth, predicted, zero_division=0)),
+            'recall': float(recall_score(ground_truth, predicted, zero_division=0)),
+            'f1': float(f1_score(ground_truth, predicted, zero_division=0)),
+            'n_predicted': int(predicted.sum()),
+            'n_ground_truth': int(ground_truth.sum()),
+        }
+
+    @staticmethod
+    def run(adata, info, config, output_dir, fractions=(0.01, 0.02, 0.05),
+            effect_sizes=(1.0, 2.0), seed=42):
+        has_spatial = info.get('has_spatial', False)
+        graph_kwargs = {'r_spatial': info.get('r_spatial', 82.5)}
+        results = []
+
+        for frac in fractions:
+            for es in effect_sizes:
+                print(f"\n--- Spike-in: {frac*100:.0f}% cells, effect_size={es} ---")
+                ad, gt_mask = SyntheticSpikeInExperiment.inject_rare_population(
+                    adata, fraction=frac, effect_size=es, seed=seed)
+                n_spike = int(gt_mask.sum())
+
+                trial = {'fraction': frac, 'effect_size': es, 'n_spiked': n_spike}
+
+                trial_config = config.copy()
+                trial_config['epochs_phase1'] = min(100, config.get('epochs_phase1', 300))
+                trial_config['epochs_phase2'] = 0
+                trial_config['patience'] = 20
+
+                data = prepare_graph_data(ad, has_spatial=has_spatial, **graph_kwargs)
+                model = build_model(trial_config, data, use_predictor=False)
+                trainer = Trainer(model, trial_config, device=trial_config['device'])
+                try:
+                    trainer.train(data)
+                    model.eval()
+                    with torch.no_grad():
+                        outputs = model(data.to(trial_config['device']))
+                    mu = outputs['mu'].cpu().numpy()
+                    logvar = outputs['logvar'].cpu().numpy()
+                    detector = RareCellDetector(threshold=config.get('rare_threshold', 2.0))
+                    _, is_rare = detector.detect(mu, logvar)
+                    trial['gvae'] = SyntheticSpikeInExperiment.evaluate_recovery(is_rare, gt_mask)
+                    print(f"  GVAE: P={trial['gvae']['precision']:.3f} "
+                          f"R={trial['gvae']['recall']:.3f} F1={trial['gvae']['f1']:.3f}")
+                except Exception as e:
+                    trial['gvae'] = {'error': str(e)}
+                    print(f"  GVAE: error - {e}")
+
+                try:
+                    scvi_model, scvi_info = ScVIBaseline.train_and_embed(ad)
+                    if scvi_model is not None:
+                        variance = ScVIBaseline.estimate_cell_uncertainty(scvi_model)
+                        var_z = (variance - np.mean(variance)) / (np.std(variance) + 1e-8)
+                        scvi_rare = var_z > 2.0
+                        trial['scvi'] = SyntheticSpikeInExperiment.evaluate_recovery(scvi_rare, gt_mask)
+                        print(f"  scVI: P={trial['scvi']['precision']:.3f} "
+                              f"R={trial['scvi']['recall']:.3f} F1={trial['scvi']['f1']:.3f}")
+                    else:
+                        trial['scvi'] = {'note': 'scvi-tools not available'}
+                except Exception as e:
+                    trial['scvi'] = {'error': str(e)}
+
+                try:
+                    scanpy_result = ScanpyBaseline.run(ad)
+                    scanpy_rare_n = scanpy_result['rare_cells']['n_rare']
+                    ad_tmp = ad.copy()
+                    n_pcs = min(50, ad_tmp.n_obs - 1, ad_tmp.n_vars - 1)
+                    if 'X_pca' not in ad_tmp.obsm:
+                        sc.pp.pca(ad_tmp, n_comps=n_pcs)
+                    sc.pp.neighbors(ad_tmp, use_rep='X_pca', n_neighbors=15)
+                    sc.tl.leiden(ad_tmp, resolution=1.0)
+                    labels = ad_tmp.obs['leiden'].astype(int).values
+                    unique_labels, counts = np.unique(labels, return_counts=True)
+                    rare_clusters = unique_labels[counts / len(labels) < 0.01]
+                    scanpy_rare = np.isin(labels, rare_clusters)
+                    trial['scanpy'] = SyntheticSpikeInExperiment.evaluate_recovery(scanpy_rare, gt_mask)
+                    print(f"  Scanpy: P={trial['scanpy']['precision']:.3f} "
+                          f"R={trial['scanpy']['recall']:.3f} F1={trial['scanpy']['f1']:.3f}")
+                except Exception as e:
+                    trial['scanpy'] = {'error': str(e)}
+
+                results.append(trial)
+
+        return results
+
+
+def run_spike_in(args, config):
+    output_dir = Path('outputs') / f'{args.data}_spike_in'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.data == 'synthetic':
+        from src.data_utils import create_synthetic_data
+        adata = create_synthetic_data(
+            config['n_cells'], config['n_genes'], config['n_patients'],
+            n_cell_types=config.get('n_cell_types', 8))
+        info = {'has_spatial': True}
+    else:
+        adata, info = load_real_data(args.data, n_hvg=args.n_hvg, max_cells=args.max_cells)
+
+    print(f"Spike-in experiment | Data: {args.data} | {adata.n_obs} cells")
+    results = SyntheticSpikeInExperiment.run(adata, info, config, output_dir)
+    with open(output_dir / 'spike_in_results.json', 'w') as f:
+        json.dump(make_serializable({'dataset': args.data, 'results': results}), f, indent=2)
+    print(f"\nResults saved to {output_dir}/spike_in_results.json")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', choices=['local', 'full'], default='local')
-    parser.add_argument('--data', choices=list(DATASETS.keys()), default='melanoma')
+    parser.add_argument('--data', choices=list(DATASETS.keys()) + ['synthetic'], default='melanoma')
     parser.add_argument('--max-cells', type=int, default=None)
     parser.add_argument('--n-hvg', type=int, default=2000)
     parser.add_argument('--methods', type=str, default='gvae,scvi,scanpy')
     parser.add_argument('--cv', action='store_true')
+    parser.add_argument('--spike-in', action='store_true')
     parser.add_argument('--n-folds', type=int, default=5)
     parser.add_argument('--batch-size', type=int, default=None)
     parser.add_argument('--transfer-source', type=str, default=None)
@@ -608,7 +761,9 @@ def main():
     if args.batch_size is not None:
         config['batch_size'] = args.batch_size
 
-    if args.transfer_source and args.transfer_target:
+    if args.spike_in:
+        run_spike_in(args, config)
+    elif args.transfer_source and args.transfer_target:
         run_transfer(args, config)
     elif args.cv:
         run_benchmark_cv(args, config)

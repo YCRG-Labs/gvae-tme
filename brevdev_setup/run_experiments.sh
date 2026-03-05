@@ -100,6 +100,16 @@ fi
 
 echo ""
 echo "=========================================="
+echo "  7. Synthetic Spike-In Validation"
+echo "=========================================="
+if [ -f "data/processed/melanoma.h5ad" ]; then
+    echo "--- Spike-in: Melanoma ---"
+    python3 benchmark.py --config full --data melanoma --spike-in \
+        2>&1 | tee outputs/melanoma_spike_in.log
+fi
+
+echo ""
+echo "=========================================="
 echo "  Experiments Complete"
 echo "=========================================="
 echo ""

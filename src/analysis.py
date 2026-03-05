@@ -206,6 +206,101 @@ class AttentionAnalyzer:
             interactions[key] += 1
         return interactions
 
+    @staticmethod
+    def novel_interactions(attention_weights, edge_index, cell_types, adata,
+                           lr_pairs=None, percentile=90):
+        if lr_pairs is None:
+            lr_pairs = LigandReceptorAnalyzer.IMMUNE_LR_PAIRS
+
+        gene_set = set(adata.var_names)
+        valid_pairs = [(l, r) for l, r in lr_pairs if l in gene_set and r in gene_set]
+        var_to_idx = {g: i for i, g in enumerate(adata.var_names)}
+
+        X = adata.X.toarray() if hasattr(adata.X, 'toarray') else np.asarray(adata.X)
+
+        n_edges = edge_index.size(1)
+        edge_attn = np.zeros(n_edges)
+        for idx in range(n_edges):
+            w = attention_weights[idx]
+            edge_attn[idx] = w.mean().item() if w.dim() > 0 else w.item()
+
+        attn_thresh = np.percentile(edge_attn, percentile)
+        high_mask = edge_attn > attn_thresh
+        expr_threshold = 0.5
+
+        lr_matched = []
+        novel = []
+        for idx in np.where(high_mask)[0]:
+            src = edge_index[0, idx].item()
+            tgt = edge_index[1, idx].item()
+
+            matched_pairs = []
+            for ligand, receptor in valid_pairs:
+                l_idx, r_idx = var_to_idx[ligand], var_to_idx[receptor]
+                if (X[src, l_idx] > expr_threshold and X[tgt, r_idx] > expr_threshold):
+                    matched_pairs.append((ligand, receptor))
+                elif (X[tgt, l_idx] > expr_threshold and X[src, r_idx] > expr_threshold):
+                    matched_pairs.append((ligand, receptor))
+
+            edge_info = {
+                'source_type': str(cell_types[src]),
+                'target_type': str(cell_types[tgt]),
+                'attention': float(edge_attn[idx]),
+            }
+
+            if matched_pairs:
+                edge_info['lr_pairs'] = matched_pairs[:3]
+                lr_matched.append(edge_info)
+            else:
+                novel.append(edge_info)
+
+        novel_gene_signatures = {}
+        if novel:
+            novel_src = list(set(edge_index[0, i].item() for i in np.where(high_mask)[0]
+                                 if edge_attn[i] > attn_thresh and i < len(novel) + len(lr_matched)))
+            novel_tgt = list(set(edge_index[1, i].item() for i in np.where(high_mask)[0]
+                                 if edge_attn[i] > attn_thresh and i < len(novel) + len(lr_matched)))
+            if len(novel_src) >= 5 and len(novel_tgt) >= 5:
+                src_expr = X[novel_src[:100]].mean(axis=0)
+                tgt_expr = X[novel_tgt[:100]].mean(axis=0)
+                diff = np.abs(src_expr - tgt_expr)
+                top_idx = np.argsort(diff)[-20:][::-1]
+                novel_gene_signatures['top_de_genes'] = [
+                    str(adata.var_names[i]) for i in top_idx]
+
+        go_results = {}
+        if novel_gene_signatures.get('top_de_genes'):
+            try:
+                import gseapy as gp
+                enr = gp.enrichr(
+                    gene_list=novel_gene_signatures['top_de_genes'],
+                    gene_sets='GO_Biological_Process_2023',
+                    organism='Human', outdir=None, no_plot=True)
+                go_results = enr.results.head(10)[
+                    ['Term', 'Adjusted P-value', 'Combined Score']].to_dict('records')
+            except (ImportError, Exception):
+                pass
+
+        pair_counts = {}
+        for e in novel:
+            key = (e['source_type'], e['target_type'])
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+
+        n_high = int(high_mask.sum())
+        return {
+            'n_high_attention': n_high,
+            'n_lr_matched': len(lr_matched),
+            'n_novel': len(novel),
+            'fraction_novel': len(novel) / max(n_high, 1),
+            'novel_gene_signatures': novel_gene_signatures,
+            'novel_go_enrichment': go_results,
+            'novel_pair_counts': [
+                {'source': k[0], 'target': k[1], 'count': v}
+                for k, v in sorted(pair_counts.items(), key=lambda x: x[1], reverse=True)
+            ][:20],
+        }
+
+
 class PredictionAnalyzer:
     @staticmethod
     def compute_metrics(y_true, y_pred):

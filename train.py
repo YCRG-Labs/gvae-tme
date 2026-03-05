@@ -79,6 +79,7 @@ def build_model(config, data, use_predictor):
         encoder_type=config.get('encoder_type', 'gat'),
         decoder_type=config.get('decoder_type', 'zinb'),
         gate_mode=config.get('gate_mode', 'learned'),
+        spatial_bias=config.get('spatial_bias', 0.0),
     )
 
 def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=None):
@@ -253,6 +254,13 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
                 ]
             print(f"Attention selectivity: {attention_metrics['mean_selectivity']:.3f} +/- "
                   f"{attention_metrics['std_selectivity']:.3f}")
+            if 'cell_type' in adata.obs.columns:
+                novel_result = AttentionAnalyzer.novel_interactions(
+                    attn_weights.cpu(), edge_index, cell_types, adata)
+                attention_metrics['novel_interactions'] = novel_result
+                print(f"  Novel interactions: {novel_result['n_novel']}/{novel_result['n_high_attention']} "
+                      f"high-attention edges have no known L-R pair "
+                      f"({novel_result['fraction_novel']:.1%})")
         except Exception as e:
             print(f"  [warn] Attention analysis: {e}")
 

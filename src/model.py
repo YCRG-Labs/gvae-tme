@@ -5,10 +5,10 @@ from torch_geometric.nn import MessagePassing, GCNConv
 from torch_geometric.utils import softmax
 
 class CellAdaptiveGate(nn.Module):
-    def __init__(self, in_dim):
+    def __init__(self, in_dim, spatial_bias=0.0):
         super().__init__()
         self.w = nn.Parameter(torch.randn(in_dim) * 0.01)
-        self.b = nn.Parameter(torch.zeros(1))
+        self.b = nn.Parameter(torch.tensor([float(spatial_bias)]))
 
     def forward(self, x):
         return torch.sigmoid(x @ self.w + self.b)
@@ -170,13 +170,14 @@ class ResponsePredictor(nn.Module):
 class GVAEModel(nn.Module):
     def __init__(self, n_features, n_genes, hidden_dim=64, latent_dim=32, n_heads=4,
                  dropout=0.2, n_neg_samples=5, use_predictor=False,
-                 encoder_type='gat', decoder_type='zinb', gate_mode='learned'):
+                 encoder_type='gat', decoder_type='zinb', gate_mode='learned',
+                 spatial_bias=0.0):
         super().__init__()
         self.gate_mode = gate_mode
         self.encoder_type = encoder_type
         self.decoder_type = decoder_type
 
-        self.gate = CellAdaptiveGate(n_features)
+        self.gate = CellAdaptiveGate(n_features, spatial_bias=spatial_bias)
 
         if encoder_type == 'gcn':
             self.encoder = GCNEncoder(n_features, hidden_dim, latent_dim, dropout)

@@ -16,6 +16,7 @@ ABLATION_REGISTRY = {
     'logreg_baseline': {'_prediction_method': 'logreg'},
     'frozen_encoder': {'freeze_encoder': True},
     'gcn_encoder': {'encoder_type': 'gcn'},
+    'spatial_bias': {'gate_mode': 'learned', 'spatial_bias': -1.0},
 }
 
 
