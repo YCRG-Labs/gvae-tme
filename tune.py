@@ -6,6 +6,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
 import torch
+from sklearn.metrics import silhouette_score as sil_score
+from sklearn.cluster import KMeans
 
 try:
     import optuna
@@ -33,6 +35,7 @@ def build_trial_config(trial, base_config):
     config['temperature'] = trial.suggest_categorical('temperature', [0.05, 0.1, 0.2, 0.5])
     config['rare_threshold'] = trial.suggest_categorical('rare_threshold', [1.5, 2.0, 2.5, 3.0])
     config['k_mol'] = trial.suggest_categorical('k_mol', [10, 15, 20, 30])
+    config['free_bits'] = trial.suggest_categorical('free_bits', [0.0, 0.25, 0.5, 1.0])
     config['hidden_dim'] = config['n_heads'] * (config['latent_dim'] // config['n_heads'] or 1)
     config['hidden_dim'] = max(config['hidden_dim'], config['n_heads'] * 4)
 
@@ -97,7 +100,19 @@ def objective(trial, base_config, data, device, adata=None, has_spatial=True, gr
                 config['lambda1'] * L_expr +
                 config['lambda2'] * L_contrast +
                 config['beta'] * L_kl)
-    return val_loss
+
+    z_np = outputs['z'].cpu().numpy()
+    n_clusters = min(8, max(2, len(z_np) // 50))
+    try:
+        labels = KMeans(n_clusters=n_clusters, n_init=3, random_state=0).fit_predict(z_np)
+        if len(set(labels)) > 1:
+            sil = sil_score(z_np, labels, sample_size=min(5000, len(z_np)))
+        else:
+            sil = 0.0
+    except Exception:
+        sil = 0.0
+
+    return val_loss - 0.1 * sil
 
 
 def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3,

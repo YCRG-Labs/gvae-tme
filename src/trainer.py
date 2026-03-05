@@ -39,9 +39,11 @@ class GVAELoss:
         return pos_loss + neg_loss
 
     @staticmethod
-    def kl_divergence(mu, logvar):
-        kl = -0.5 * torch.sum(1.0 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-        return kl.mean()
+    def kl_divergence(mu, logvar, free_bits=0.0):
+        kl_per_dim = -0.5 * (1.0 + logvar - mu.pow(2) - logvar.exp())
+        if free_bits > 0:
+            kl_per_dim = torch.clamp(kl_per_dim, min=free_bits)
+        return kl_per_dim.sum(dim=1).mean()
 
     @staticmethod
     def contrastive(z, pos_pairs, neg_pairs, temperature=0.1):
@@ -104,6 +106,7 @@ class Trainer:
         self.epochs_phase2 = config.get('epochs_phase2', 200)
         self.patience = config.get('patience', 50)
         self.beta_warmup_epochs = config.get('beta_warmup_epochs', 50)
+        self.free_bits = config.get('free_bits', 0.0)
         self.tolerance = 1.1
         self.max_gamma_reductions = 3
         self.phase1_metrics = {}
@@ -142,9 +145,12 @@ class Trainer:
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=epochs)
 
     def get_beta(self, epoch):
-        if epoch >= self.beta_warmup_epochs:
-            return self.beta_target
-        return self.beta_target * (epoch / self.beta_warmup_epochs)
+        n_cycles = self.config.get('beta_cycles', 4)
+        cycle_length = max(self.epochs_phase1 / n_cycles, 1)
+        cycle_pos = (epoch % cycle_length) / cycle_length
+        if cycle_pos < 0.5:
+            return self.beta_target * (cycle_pos / 0.5)
+        return self.beta_target
 
     def compute_loss(self, outputs, data, phase=1, epoch=1):
         L_adj = self.loss_fn.adjacency_negsampling(outputs['pos_scores'], outputs['neg_scores'])
@@ -156,7 +162,7 @@ class Trainer:
             L_expr = self.loss_fn.zinb(x_raw, outputs['rho'], outputs['theta'], outputs['pi'])
 
         beta = self.get_beta(epoch) if phase == 1 else self.beta_target
-        L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'])
+        L_kl = self.loss_fn.kl_divergence(outputs['mu'], outputs['logvar'], free_bits=self.free_bits)
         L_contrast = torch.tensor(0.0, device=self.device)
         if hasattr(data, 'pos_pairs') and hasattr(data, 'neg_pairs'):
             if data.pos_pairs.size(0) > 0 and data.neg_pairs.size(0) > 0:
