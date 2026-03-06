@@ -687,7 +687,7 @@ def process_nsclc_ici(max_cells_per_patient=1000):
         gc.collect()
 
         adata.obs['patient_id'] = adata.obs['sampleID']
-        resp_map = {'MPR': 'responder', 'pCR': 'responder', 'non-MPR': 'non-responder'}
+        resp_map = {'MPR': 1, 'pCR': 1, 'non-MPR': 0}
         adata.obs['response'] = adata.obs['pathological_response'].map(resp_map)
         adata = adata[adata.obs['response'].notna()].copy()
 
@@ -826,7 +826,7 @@ def process_nsclc_ici(max_cells_per_patient=1000):
 
     adata.obs['patient_id'] = adata.obs['sampleID']
 
-    resp_map = {'MPR': 'responder', 'pCR': 'responder', 'non-MPR': 'non-responder'}
+    resp_map = {'MPR': 1, 'pCR': 1, 'non-MPR': 0}
     adata.obs['response'] = adata.obs['pathological_response'].map(resp_map)
     adata = adata[adata.obs['response'].notna()].copy()
     print(f"  After dropping unknown response: {adata.n_obs} cells")
