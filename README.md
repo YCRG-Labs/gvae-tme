@@ -1,34 +1,41 @@
 # GVAE-TME
 
-Graph Variational Autoencoder for Tumor Microenvironment Analysis.
-
-## Install
-
-```bash
-pip install -e .
-```
+Graph Variational Autoencoder for Tumor Microenvironment Analysis. Learns spatial and molecular cell representations via a dual-graph GAT encoder with cell-adaptive gating, ZINB expression decoder, and attention-based patient pooling for treatment response prediction.
 
 ## Quick Start
 
 ```bash
-python train.py
+pip install -r requirements.txt
+
+python train.py --config local   
+python train.py --config full  
 ```
 
-Trains on 5K synthetic cells. Outputs saved to `outputs/`.
+Outputs saved to `outputs/`.
 
 ## Structure
 
-- `src/model.py` - GVAEModel with cell-adaptive gate, dual decoder
+- `src/config.py` - LOCAL and FULL configs, device detection (cuda/mps/cpu)
+- `src/model.py` - GVAEModel with cell-adaptive gate, dual decoder, response predictor
 - `src/trainer.py` - Two-phase training with reconstruction safeguards
 - `src/analysis.py` - Rare cell detection, clustering, prediction
 - `src/data_utils.py` - Graph construction from AnnData
 - `train.py` - End-to-end pipeline
-- `analyze.py` - 
 
 ## Key Features
 
-- Cell-adaptive hybrid graph fusion
+- Cell-adaptive hybrid graph fusion (learned gate blends molecular and spatial graphs per-cell)
 - ZINB expression decoder + adjacency decoder
 - KL-based rare cell detection
-- Attention-based patient pooling
+- Attention-based patient pooling for treatment response
 - Two-phase training prevents latent collapse
+- Patient-level train/val/test splits (no data leak in Phase 2)
+- Contrastive loss with adaptive negative mining
+
+## Requirements
+
+- Python 3.9+
+- PyTorch 2.0+
+- PyTorch Geometric 2.3+
+- scanpy, anndata, leidenalg
+- See `requirements.txt` for full list

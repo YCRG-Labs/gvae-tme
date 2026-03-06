@@ -1,0 +1,569 @@
+\documentclass{article}
+\usepackage{arxiv}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{graphicx}
+\usepackage{natbib}
+\usepackage{doi}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{shapes,arrows,positioning,calc,backgrounds,fit,patterns,decorations.pathreplacing}
+\usepackage{amsthm}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{cleveref}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{hypothesis}{Hypothesis}
+\newtheorem{definition}{Definition}
+
+\newcommand{\KL}{\mathrm{KL}}
+\newcommand{\sigmoid}{\sigma}
+
+\title{Spatially-Informed Graph Variational Autoencoders Reveal Rare Immunosuppressive Tumor Microenvironment Subpopulations Predictive of Immunotherapy Resistance}
+
+\author{
+    Kundana Kommini$^{1}$, Maximilian Rutkowski$^{1}$, J. Crainic$^{1}$, Brandon Yee$^{1}$\\
+    $^{1}$Biology Lab, Yee Collins Research Group\\
+    \texttt{\{k.kommini, m.rutkowski, j.crainic, b.yee\}@ycrg-labs.org}
+}
+
+\date{February 12, 2026}
+
+\renewcommand{\headeright}{Preprint}
+\renewcommand{\undertitle}{Preprint}
+\renewcommand{\shorttitle}{Graph VAE for TME Analysis}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The tumor microenvironment (TME) orchestrates cancer progression and therapeutic resistance through complex cellular interactions that are poorly captured by conventional analysis methods. Here we propose a graph variational autoencoder (GVAE) framework that integrates single-cell RNA sequencing with spatial transcriptomics to model the TME as a relational network, enabling discovery of rare cell states and prediction of immunotherapy response. Our approach constructs cellular graphs where nodes represent individual cells with high-dimensional transcriptomic features, and edges encode both molecular similarity and spatial adjacency through a learned, cell-adaptive gating mechanism that replaces static weighting. The GVAE learns a low-dimensional latent representation through a multi-objective loss combining graph reconstruction, zero-inflated negative binomial expression reconstruction, contrastive spatial discrimination, and variational regularization. We introduce KL-divergence-based rare cell detection that exploits the VAE's uncertainty estimates to identify anomalous cells without relying on standard clustering, uncertainty-aware clustering that incorporates per-cell confidence into community assignments, and end-to-end differentiable immunotherapy response prediction with attention-based patient pooling. We validate this framework across four cancer types comprising over 2.3 million cells and spatial spots from publicly available datasets, with immunotherapy response prediction evaluated on two independent cohorts---a melanoma cohort of 16,291 cells from 32 checkpoint inhibitor-treated patients \citep{sadefeldman2018} and an NSCLC cohort of 243 patients receiving neoadjuvant anti-PD-1 plus chemotherapy \citep{deng2025nsclc}---and spatial analysis validated on Visium HD colorectal and lung cancer tissues. The proposed research addresses a critical gap in cancer systems biology by jointly embedding molecular and spatial information to reveal spatially-restricted immunosuppressive niches invisible to conventional clustering, with immediate translational potential for precision oncology.
+\end{abstract}
+
+\keywords{tumor microenvironment $\cdot$ graph neural networks $\cdot$ single-cell transcriptomics $\cdot$ spatial transcriptomics $\cdot$ immunotherapy $\cdot$ deep learning $\cdot$ variational autoencoders}
+
+\section{Introduction}
+
+\subsection{Clinical Motivation and Unmet Need}
+
+Immunotherapy has reshaped cancer treatment over the past decade, producing durable responses in patients with previously untreatable malignancies \citep{sharma2015future}. Yet clinical efficacy remains limited: only 20-40\% of patients respond to checkpoint blockade across most cancer types \citep{haslam2019estimation}. The primary determinant of therapeutic response lies within the tumor microenvironment (TME), an ecosystem comprising malignant cells, immune infiltrates, stromal components, and vascular elements that collectively shape cancer progression and treatment resistance \citep{hinshaw2019tumor}.
+
+The TME harbors immunosuppressive cell populations that actively mediate resistance to checkpoint inhibitors through diverse mechanisms including T cell exclusion, metabolic competition, and secretion of inhibitory cytokines \citep{cassetta2018targeting}. These immunosuppressive populations often comprise less than 5\% of total TME cells yet exert disproportionate influence on clinical outcomes \citep{murray2014macrophage}. Current computational approaches inadequately capture these rare but critical cell states, limiting our ability to predict therapy response and identify novel therapeutic targets. The challenge is compounded by the spatial organization of the TME, where cellular neighborhoods and interaction networks shape immune function \citep{binnewies2018understanding}. A macrophage proximal to the tumor-immune interface exhibits markedly different phenotypic and functional properties compared to an otherwise transcriptionally similar macrophage located in distal stroma, yet conventional single-cell analysis treats these cells as equivalent.
+
+\subsection{Limitations of Current Analytical Approaches}
+
+Despite rapid technological advances in single-cell profiling, computational methods for TME analysis have not kept pace \citep{stuart2019integrative}. Current approaches fall into three broad categories, each with limitations that constrain biological discovery.
+
+Conventional clustering methods such as Seurat \citep{hao2021integrated} and Scanpy \citep{wolf2018scanpy} treat cells as independent observations, applying dimensionality reduction and clustering algorithms that implicitly assume statistical independence. This discards information about cell-cell relationships, spatial organization, and interaction networks known to drive TME function and immunosuppression \citep{palla2022squidpy}. Standard clustering also exhibits bias toward abundant populations; rare cell states comprising less than 5\% of cells are frequently absorbed into nearby clusters or relegated to an undifferentiated ``other'' category.
+
+Ligand-receptor interaction tools such as CellChat \citep{jin2021inference} and CellPhoneDB \citep{efremova2020cellphonedb} infer cellular communication by identifying co-expression of known receptor-ligand pairs across populations. These methods generate thousands of predicted interactions without spatial validation, rely on curated databases that limit discovery of new signaling mechanisms, and perform inference post-hoc after cell type assignment rather than integrating interaction information into cell state definition itself.
+
+Spatial analysis frameworks such as Squidpy \citep{palla2022squidpy} and Giotto \citep{dries2021giotto} provide tools for analyzing spatial patterns including neighborhood enrichment, spatial autocorrelation, and niche identification. But these methods typically analyze spatial organization after clustering has already been performed on molecular features alone, meaning spatial information never influences cell state definitions. Transcriptionally similar but spatially distinct populations with divergent biological functions can be missed entirely.
+
+\subsection{Graph Neural Networks for Relational Biological Data}
+
+Graph neural networks (GNNs) learn from relational data by operating on graph structures where entities (nodes) are connected by relationships (edges) \citep{wu2020comprehensive}. The core idea is that many real-world systems are naturally represented as graphs, and both topology and node features jointly determine system behavior. GNNs capture dependencies that are invisible to methods treating observations as independent.
+
+The TME is a relational system: cellular phenotypes and functions emerge from networks of cell-cell interactions mediated by direct contact, paracrine signaling, and spatial proximity \citep{armingol2021deciphering}. Graphs offer a biologically motivated representation where nodes are individual cells with transcriptomic profiles and edges encode molecular similarity, spatial adjacency, or inferred interactions. Despite this alignment and the success of GNNs in molecular chemistry and protein structure prediction \citep{zitnik2018modeling}, graph-based deep learning remains underutilized in TME research. Existing applications have been limited to cell type classification \citep{shao2020sccatch} or have not integrated spatial information into the graph structure.
+
+\subsection{Variational Autoencoders for Uncertainty Quantification}
+
+Variational autoencoders (VAEs) learn a probabilistic latent representation rather than a deterministic embedding \citep{kingma2013auto}. The probabilistic formulation suits biological data for several reasons. VAEs quantify uncertainty through the learned variance of the latent distribution, flagging cells with ambiguous or transitional states. The variational inference framework handles the high technical noise in single-cell data, where dropout, batch effects, and sampling variability obscure biological signal. And the Kullback-Leibler divergence regularizer encourages disentangled latent representations that correspond to meaningful biological axes of variation.
+
+Graph variational autoencoders (GVAEs) \citep{kipf2016variational} combine GNN relational learning with the probabilistic VAE framework. By reconstructing graph structure and node features from a low-dimensional latent space, GVAEs discover organizing principles governing cellular relationships. The variational formulation is particularly suited to rare cell detection: learned uncertainty estimates flag unusual cells that deviate from the typical latent manifold. GVAEs have not, however, been systematically developed or validated for integrated single-cell and spatial transcriptomics analysis.
+
+\subsection{Research Objectives and Expected Impact}
+
+This research introduces a GVAE framework designed for integrated analysis of single-cell RNA sequencing and spatial transcriptomics to characterize the TME. Our approach jointly models molecular similarity and spatial adjacency in a unified graph representation, enabling discovery of spatially-restricted cell states invisible to conventional analysis. We validate the framework across four cancer types---melanoma, breast, colorectal, and non-small cell lung cancer (NSCLC)---using publicly available datasets comprising over 2.3 million cells and spatial spots. Because no single publicly available dataset currently provides both genome-wide spatial transcriptomics and patient-level immunotherapy response annotations, we adopt a modular validation strategy: immunotherapy response prediction is evaluated on two independent cohorts---a melanoma scRNA-seq cohort with clinical response labels \citep{sadefeldman2018} (32 patients) and a large NSCLC neoadjuvant immunotherapy cohort \citep{deng2025nsclc} (243 patients)---while spatial graph construction, cell-adaptive gating, and contrastive spatial discrimination are validated on Visium HD colorectal and NSCLC tissues with native spatial coordinates.
+
+The work delivers a computational framework for multi-modal TME analysis featuring cell-adaptive graph fusion, dual reconstruction with expression-aware decoding, and contrastive spatial learning. It enables systematic identification of rare immunosuppressive TME subpopulations through KL-divergence-based anomaly detection, end-to-end differentiable prediction of immunotherapy response through attention-based patient pooling, and construction of a TME cellular state atlas across cancer types.
+
+Most cancer patients do not respond to immunotherapy, and we lack reliable tools to predict who will benefit or to identify drivers of resistance. By revealing the spatial organization principles governing immunosuppression and developing practical biomarkers for patient stratification, this research has direct potential to improve therapeutic decision-making.
+
+\section{Related Work}
+
+\subsection{Single-Cell Transcriptomics Analysis Methods}
+
+Single-cell RNA sequencing technologies over the past decade have enabled molecular profiling of individual cells within complex tissues \citep{tanay2017scaling}. Early computational frameworks focused on preprocessing challenges including normalization, batch correction, and dimensionality reduction. Seurat \citep{satija2015spatial} introduced anchor-based integration methods for combining datasets across batches and experimental conditions. Scanpy \citep{wolf2018scanpy} provided a Python-based alternative with scalable implementations handling datasets exceeding one million cells.
+
+These clustering-based approaches have become the de facto standard for single-cell analysis, typically following a sequential pipeline of quality control, normalization, highly variable gene selection, dimensionality reduction via principal component analysis, construction of k-nearest neighbor graphs in PCA space, and community detection using algorithms such as Louvain or Leiden \citep{traag2019louvain}. While computationally efficient and broadly applicable, these methods treat cells as independent observations and rely heavily on Euclidean distances in gene expression space. Recent benchmarking studies have revealed that clustering results can be highly sensitive to preprocessing choices, parameter settings, and algorithm selection, with different methods producing substantially different cell type annotations on identical data \citep{luecken2019current}.
+
+Deep learning approaches have increasingly been applied to overcome limitations of linear dimensionality reduction and distance-based clustering. scVI (single-cell Variational Inference) \citep{lopez2018deep} employs a VAE framework to learn a low-dimensional latent representation while explicitly modeling technical noise sources including library size variation and batch effects. The probabilistic formulation enables uncertainty quantification and principled differential expression testing. scGAN \citep{marouf2020realistic} applies generative adversarial networks to learn realistic single-cell expression distributions and perform semi-supervised cell type classification. SAUCIE \citep{amodio2019exploring} combines autoencoders with information theory-based regularization to learn interpretable, disentangled representations. However, none of these methods explicitly model cell-cell relationships or integrate spatial information into their architecture.
+
+\subsection{Spatial Transcriptomics Technologies and Analysis}
+
+Spatial transcriptomics complements single-cell RNA sequencing by measuring gene expression while preserving native tissue architecture \citep{moses2022museum}. Visium (10x Genomics) performs transcriptome-wide profiling of 55-micron diameter spots containing approximately 1-10 cells, providing genome-wide coverage at moderate spatial resolution. Recent advances including Visium HD reduce spot size to subcellular resolution while maintaining transcriptome-wide profiling. Targeted spatial technologies such as Xenium and CosMx achieve single-cell resolution but measure a predefined panel of 200-1000 genes selected for biological relevance.
+
+Analytical methods for spatial transcriptomics have evolved rapidly. Squidpy \citep{palla2022squidpy} provides a framework for spatial analysis including neighborhood enrichment testing, spatial autocorrelation via Moran's I, and ligand-receptor interaction inference with spatial context. Giotto \citep{dries2021giotto} offers an alternative ecosystem with particularly strong visualization capabilities. Deconvolution methods such as Cell2Location \citep{kleshchevnikov2022cell2location} and RCTD \citep{cable2022robust} use single-cell RNA-seq reference atlases to infer cell type composition of spatial spots. However, existing spatial analysis methods typically operate on predefined cell type annotations derived from molecular data alone, rather than jointly learning cell states from integrated molecular and spatial features.
+
+\subsection{Graph Neural Networks in Biological Applications}
+
+Graph neural networks have proven effective in biological applications where relational structure governs system behavior \citep{zhou2020graph}. In molecular property prediction, GNNs learn representations of chemical compounds by iteratively aggregating information from bonded atoms \citep{gilmer2017neural}. In protein structure prediction, GNNs operate on residue contact graphs to predict 3D coordinates and functional sites \citep{ingraham2019generative}. Knowledge graph embedding methods use GNNs to predict missing relationships in biomedical knowledge bases, facilitating drug repurposing and disease gene discovery \citep{zitnik2018modeling}.
+
+Applications of GNNs to single-cell transcriptomics data have been more limited but are rapidly emerging. scGNN \citep{wang2021scgnn} constructs a cell-cell similarity graph and applies graph convolutional networks for imputation and clustering, demonstrating improved accuracy in detecting rare cell types. GraphSCC \citep{sun2021graph} uses attention-based graph neural networks for semi-supervised cell type annotation. However, these applications treat the graph structure as a preprocessing step rather than as a fundamental representation for biological discovery. None of these methods integrate spatial information into the graph construction or use the graph structure for unsupervised discovery of spatially-restricted cell states.
+
+\subsection{Cell-Cell Communication Inference}
+
+Understanding cellular communication networks within the TME has become a central goal of cancer systems biology \citep{armingol2021deciphering}. CellPhoneDB \citep{efremova2020cellphonedb} pioneered computational inference of ligand-receptor interactions by testing for enriched co-expression of known receptor-ligand pairs. CellChat \citep{jin2021inference} extends this framework by incorporating multi-subunit complexes and signaling pathway annotations. NicheNet \citep{browaeys2020nichenet} integrates gene regulatory network information to predict how ligands influence target gene expression in receiver cells. These methods suffer from reliance on curated databases, strong independence assumptions, and critically, inference without spatial constraints. Recent methods such as COMMOT \citep{cang2023inferring} and MISTy \citep{tanevski2020explainable} begin to incorporate spatial information but still rely on sequential workflows where cell types are defined before spatial interaction inference.
+
+\subsection{Variational Autoencoders for Biological Data}
+
+Variational autoencoders have been widely applied to biological omics data for their ability to learn compressed representations while providing uncertainty quantification \citep{way2018extracting}. scVI \citep{lopez2018deep} applies VAEs to single-cell RNA-seq data, modeling the generative process through a zero-inflated negative binomial distribution while explicitly handling batch effects and library size variation. totalVI \citep{gayoso2021joint} extends this to jointly model RNA and protein measurements from CITE-seq experiments.
+
+Graph variational autoencoders extend the VAE framework to graph-structured data by using graph convolutional encoders that aggregate information from node neighborhoods \citep{kipf2016variational}. The original GVAE formulation uses a two-layer graph convolutional network as the encoder and an inner product decoder to reconstruct the adjacency matrix. However, these general-purpose GVAE architectures have not been adapted to the specific characteristics of single-cell transcriptomics data, including high dimensionality, sparsity, technical noise, and the need to integrate spatial information.
+
+\subsection{Deep Learning for Immunotherapy Response Prediction}
+
+Prediction of immunotherapy response remains one of the most pressing challenges in precision oncology, with existing biomarkers such as PD-L1 expression and tumor mutational burden providing only modest predictive accuracy \citep{jardim2021role}. Deep learning approaches have been applied to diverse data modalities: convolutional neural networks on histopathology images \citep{kather2019deep}, and multi-modal methods integrating histopathology, genomics, and clinical variables \citep{chen2020pathomic}. Analysis of TME cellular composition reveals associations between immune infiltration patterns and therapeutic response \citep{tumeh2014pd}, but cell type proportion-based models explain only a modest fraction of response variance. Recent work has begun exploring topological and spatial features of the TME \citep{keren2018structured}, but no existing work integrates graph-based deep learning representations with end-to-end differentiable predictive modeling for immunotherapy response.
+
+\subsection{Open Questions and Methodological Gaps}
+
+Despite substantial progress, several gaps persist. Existing workflows analyze molecular and spatial modalities sequentially rather than jointly, potentially missing spatially-restricted populations. Standard clustering reliably detects abundant cell types but systematically misses rare populations below 5\% frequency. Ligand-receptor inference generates thousands of candidate interactions without prioritizing which are functionally relevant. And TME representations for predicting immunotherapy response remain limited to cell type proportions, ignoring higher-order spatial and topological structure.
+
+This research addresses these gaps at each stage of the analysis pipeline. At the graph construction level, a cell-adaptive hybrid fusion mechanism learns per-cell weighting of molecular versus spatial information, replacing static $\alpha$ parameters. The GVAE itself incorporates dual reconstruction with a ZINB expression decoder that forces the latent space to preserve both relational structure and molecular identity, alongside a contrastive spatial loss that discriminates transcriptionally similar cells occupying different spatial contexts. Downstream, KL-divergence-based rare cell detection exploits the VAE's native uncertainty estimates to surface anomalous cells that standard clustering absorbs into abundant neighbors. Finally, end-to-end differentiable immunotherapy response prediction with attention-based patient pooling closes the loop between representation learning and clinical utility.
+
+\section{Methodology}
+
+\subsection{Overview of Analytical Framework}
+
+Our framework integrates single-cell RNA sequencing (scRNA-seq) and spatial transcriptomics through a graph-based deep learning architecture centered on a graph variational autoencoder (GVAE). The pipeline begins with data acquisition, quality control, and preprocessing, then constructs cellular graphs using \textit{cell-adaptive hybrid fusion} that learns per-cell weighting of molecular and spatial information. A GVAE is trained with a \textit{multi-objective loss} combining graph reconstruction, gene expression reconstruction, contrastive spatial discrimination, and variational regularization. Downstream analysis includes \textit{KL-divergence-based rare cell detection}, uncertainty-aware clustering, interpretable attention analysis, and \textit{end-to-end differentiable immunotherapy response prediction}. Italicized components denote contributions specific to this work.
+
+The framework is designed to operate across data modalities. When spatial coordinates are available (e.g., Visium, Visium HD), the full pipeline constructs both molecular and spatial graphs, enabling cell-adaptive fusion, contrastive spatial discrimination, and spatial gate interpretation. For scRNA-seq data without spatial coordinates, the model operates in molecular-only mode: the spatial graph is absent, the cell-adaptive gate converges to $g_i \approx 1$ for all cells, and the contrastive spatial loss is disabled ($\lambda_2 = 0$). The remaining components---graph attention encoding, dual reconstruction, KL-based rare cell detection, and immunotherapy response prediction---function identically regardless of whether spatial information is present.
+
+\subsection{Data Acquisition and Preprocessing}
+
+Single-cell RNA sequencing and spatial transcriptomics datasets undergo quality control and normalization following established best practices. For scRNA-seq, we filter cells retaining 200-6000 detected genes per cell, total UMI count within dataset-specific bounds, and mitochondrial gene fraction below 20\%. Doublets are removed using Scrublet \cite{wolock2019scrublet} with an expected doublet rate of 6-8\%. Count matrices are normalized to 10{,}000 UMI per cell and log-transformed using $\log(\text{count} + 1)$. Highly variable genes (HVGs) are selected using the deviance-based method implemented in Scanpy \cite{wolf2018scanpy}, retaining 2{,}000-5{,}000 genes depending on dataset complexity. Technical variation from total UMI count and mitochondrial gene percentage is regressed out via linear models.
+
+For spatial transcriptomics, spots are filtered by total UMI count with technology- and tissue-specific thresholds. For Visium HD data (colorectal, NSCLC), 2\,$\mu$m bins are aggregated to 16\,$\mu$m resolution and filtered to bins with $>$10 total UMI, balancing spatial granularity with per-bin sequencing depth. Spatial coordinates are aligned to histology images through fiducial marker registration. Where matched scRNA-seq reference data is available, cell type deconvolution is performed using Cell2Location \cite{kleshchevnikov2022cell2location} to estimate per-spot cellular composition. Table~\ref{tab:datasets} summarizes the primary datasets analyzed.
+
+\begin{table}[t]
+\centering
+\caption{Primary datasets for tumor microenvironment graph analysis.}
+\label{tab:datasets}
+\small
+\begin{tabular}{@{}llrrlcc@{}}
+\toprule
+\textbf{Cancer Type} & \textbf{Technology} & \textbf{Cells/Spots} & \textbf{Samples} & \textbf{Accession} & \textbf{Spatial} & \textbf{Response} \\
+\midrule
+Melanoma & scRNA-seq (Smart-seq2) & 16,291 & 48 (32 pt) & GSE120575 & & \checkmark \\
+NSCLC & scRNA-seq (10x 5'/3') & --- & 243 pt & GSE243013 & & \checkmark \\
+Breast & scRNA-seq (10x 5'/3') & 74,010 & 4 & GSE243280 & & \\
+Colorectal & Visium HD (16\,$\mu$m bins) & 2,092,649 & 48 (5 pt) & GSE280318 & \checkmark & \\
+NSCLC & scRNA-seq (10x 5') & 6,697 & 1 & 10x Genomics & & \\
+NSCLC & Visium HD (16\,$\mu$m bins) & 158,058 & 1 & 10x Genomics & \checkmark & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two cohorts provide patient-level immunotherapy response annotations, enabling evaluation of the full prediction pipeline including Phase~2 clinical fine-tuning. The melanoma cohort \citep{sadefeldman2018} comprises 32 patients treated with anti-PD-1, anti-CTLA-4, or combination checkpoint blockade, with binary responder/non-responder labels. The NSCLC neoadjuvant immunotherapy cohort \citep{deng2025nsclc} provides 243 patients treated with anti-PD-1 plus chemotherapy, with major pathological response (MPR) versus non-MPR labels, serving as an independent validation of predictive generalizability across cancer types. Spatial analysis components---cell-adaptive gating, contrastive spatial discrimination, and spatial gate interpretation---are validated on the Visium HD datasets (colorectal, NSCLC) which preserve native tissue coordinates. Representation learning, rare cell detection, and clustering quality are evaluated across all datasets.
+
+
+\subsection{Graph Construction}
+
+We represent the tumor microenvironment as a graph $\mathcal{G} = (\mathcal{V}, \mathcal{E}, \mathbf{X})$ where nodes $\mathcal{V}$ correspond to individual cells or spatial spots, edges $\mathcal{E}$ encode relationships, and $\mathbf{X} \in \R^{N \times d}$ is the node feature matrix of gene expression profiles (optionally PCA-reduced to $d = 50$ dimensions for large datasets). We construct two base graphs encoding complementary biological relationships, then fuse them through a learned cell-adaptive mechanism.
+
+\subsubsection{Base Graph Construction}
+
+The \textbf{molecular similarity graph} captures transcriptional relationships via a $k$-nearest neighbor ($k$-NN) graph in PCA-reduced expression space. For each cell $i$, we identify its $k$ nearest neighbors by Euclidean distance in the top-50 PC space, with $k \in \{10, 15, 20, 30\}$ optimized via cross-validation. Edge weights follow a Gaussian kernel:
+\begin{equation}
+    A^{\text{mol}}_{ij} =
+    \begin{cases}
+        \exp\!\left(-\dfrac{\|d_{\text{PCA}}(i,j)\|^2}{2\sigma^2}\right) & \text{if } j \in k\text{-NN}(i) \\[6pt]
+        0 & \text{otherwise}
+    \end{cases}
+    \label{eq:mol_graph}
+\end{equation}
+where $\sigma$ is the median $k$-th nearest neighbor distance across all cells. The molecular graph is constructed for all datasets regardless of modality.
+
+The \textbf{spatial adjacency graph} encodes physical proximity in tissue sections and is constructed only for datasets with spatial coordinates (Table~\ref{tab:datasets}). Edge weights use technology-specific radius thresholds:
+\begin{equation}
+    A^{\text{spatial}}_{ij} =
+    \begin{cases}
+        \exp\!\left(-\dfrac{\|d_{\text{spatial}}(i,j)\|^2}{2\delta^2}\right) & \text{if } d_{\text{spatial}}(i,j) < r \\[6pt]
+        0 & \text{otherwise}
+    \end{cases}
+    \label{eq:spatial_graph}
+\end{equation}
+where $r = 1.5 \times$ spot diameter for Visium (${\approx}82.5\,\mu$m) and $r = 20\,\mu$m for single-cell resolution technologies (e.g., Xenium), with bandwidth $\delta = r/3$. Both base adjacency matrices are symmetrized via $A^{\text{sym}}_{ij} = \max(A_{ij}, A_{ji})$.
+
+\subsubsection{Cell-Adaptive Hybrid Graph Fusion}
+\label{sec:adaptive_fusion}
+
+A central methodological contribution is the replacement of static graph fusion with a \textit{learned, cell-specific} gating mechanism. The biological motivation is direct: a tumor cell deep within a homogeneous core benefits primarily from molecular similarity to identify its transcriptional state, while an immune cell at the invasive margin requires spatial context to distinguish its functional role from transcriptionally similar cells in distal stroma. A global weighting parameter cannot capture this heterogeneity.
+
+We parameterize a per-cell gate $g_i \in (0, 1)$ via a single-layer neural network applied to the raw node features:
+\begin{equation}
+    g_i = \sigmoid(\mathbf{w}_g^\top \mathbf{x}_i + b_g)
+    \label{eq:gate}
+\end{equation}
+where $\mathbf{w}_g \in \R^d$ and $b_g \in \R$ are learnable parameters, and $\sigmoid(\cdot)$ is the sigmoid function. The hybrid adjacency for cell $i$'s neighborhood is then:
+\begin{equation}
+    A^{\text{hybrid}}_{ij} = g_i \cdot A^{\text{mol}}_{ij} + (1 - g_i) \cdot A^{\text{spatial}}_{ij}
+    \label{eq:hybrid}
+\end{equation}
+
+This construction is intentionally asymmetric: $g_i$ controls the information \textit{received} by cell $i$ from its neighbors, analogous to how a cell's microenvironmental context determines which signals it integrates. The gate parameters $\mathbf{w}_g$ and $b_g$ are trained jointly with the GVAE through backpropagation, requiring no separate optimization.
+
+For scRNA-seq datasets lacking spatial coordinates, $\mathbf{A}^{\text{spatial}} = \mathbf{0}$ and the hybrid adjacency reduces to $A^{\text{hybrid}}_{ij} = g_i \cdot A^{\text{mol}}_{ij}$. The gate value $g_i$ then acts as a learned per-cell scaling factor on molecular edge weights. In practice, the gate converges to uniformly high values ($g_i \approx 1$) in the absence of spatial signal, and the model operates equivalently to a molecular-only graph encoder.
+
+In matrix form, the hybrid adjacency is:
+\begin{equation}
+    \mathbf{A}^{\text{hybrid}} = \text{diag}(\mathbf{g}) \, \mathbf{A}^{\text{mol}} + \text{diag}(\mathbf{1} - \mathbf{g}) \, \mathbf{A}^{\text{spatial}}
+    \label{eq:hybrid_matrix}
+\end{equation}
+where $\mathbf{g} = [g_1, \ldots, g_N]^\top$. The learned gate values are directly interpretable: mapping $g_i$ onto spatial tissue coordinates produces a \textit{spatial importance map} revealing where in the tissue the model determines that spatial context is necessary for accurate cell state characterization.
+
+
+\subsection{Graph Variational Autoencoder Architecture}
+
+Our GVAE learns a low-dimensional probabilistic representation of each cell that captures both its transcriptional identity and its position within the cellular interaction network. The architecture comprises a graph attention encoder, a dual decoder that reconstructs both graph structure and gene expression, and a contrastive spatial objective that enforces discrimination between spatially distinct cell states.
+
+\subsubsection{Graph Attention Encoder}
+
+The encoder employs graph attention networks (GATs) \cite{velickovic2017graph} to aggregate neighborhood information with learned importance weighting. Two GAT layers with exponential linear unit (ELU) activation compose the encoder. The first layer computes multi-head attention over the hybrid graph:
+\begin{equation}
+    \mathbf{H}^{(1)} = \text{ELU}\!\left(\text{GAT}(\mathbf{X}, \mathbf{A}^{\text{hybrid}}; \mathbf{W}^{(1)})\right)
+    \label{eq:gat_layer1}
+\end{equation}
+
+For attention head $k \in \{1, \ldots, H\}$, the attention coefficient from node $j$ to node $i$ is:
+\begin{equation}
+    \alpha^{k}_{ij} = \frac{
+        \exp\!\left(\text{LeakyReLU}\!\left(\mathbf{a}_k^\top [\mathbf{W}_k \mathbf{x}_i \,\|\, \mathbf{W}_k \mathbf{x}_j]\right)\right)
+    }{
+        \sum_{\ell \in \mathcal{N}(i)} \exp\!\left(\text{LeakyReLU}\!\left(\mathbf{a}_k^\top [\mathbf{W}_k \mathbf{x}_i \,\|\, \mathbf{W}_k \mathbf{x}_\ell]\right)\right)
+    }
+    \label{eq:attention}
+\end{equation}
+where $\mathbf{W}_k \in \R^{d' \times d}$ is a learned linear transformation, $\mathbf{a}_k \in \R^{2d'}$ is a learned attention vector, $\|$ denotes concatenation, $\mathcal{N}(i)$ is the neighborhood of node $i$ defined by non-zero entries in $\mathbf{A}^{\text{hybrid}}$, and LeakyReLU uses negative slope $0.2$. Multi-head outputs are concatenated:
+\begin{equation}
+    \text{GAT}(\mathbf{X}, \mathbf{A})_i = \Big\|_{k=1}^{H} \sum_{j \in \mathcal{N}(i)} \alpha^k_{ij} \mathbf{W}_k \mathbf{x}_j
+    \label{eq:multihead}
+\end{equation}
+
+The second encoder layer produces the variational parameters $\boldsymbol{\mu}$ and $\log \boldsymbol{\sigma}^2$ that define the approximate posterior:
+\begin{align}
+    \boldsymbol{\mu} &= \text{GAT}(\mathbf{H}^{(1)}, \mathbf{A}^{\text{hybrid}}; \mathbf{W}^{(2)}_\mu) \label{eq:mu} \\
+    \log \boldsymbol{\sigma}^2 &= \text{GAT}(\mathbf{H}^{(1)}, \mathbf{A}^{\text{hybrid}}; \mathbf{W}^{(2)}_\sigma) \label{eq:sigma}
+\end{align}
+
+Each cell $i$ is thus associated with an approximate posterior $q(\mathbf{z}_i \mid \mathbf{X}, \mathbf{A}) = \N(\boldsymbol{\mu}_i, \text{diag}(\boldsymbol{\sigma}_i^2))$.
+
+\subsubsection{Latent Space Sampling}
+
+Backpropagation through stochastic sampling employs the reparameterization trick \cite{kingma2013auto}:
+\begin{equation}
+    \mathbf{z}_i = \boldsymbol{\mu}_i + \boldsymbol{\sigma}_i \odot \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \N(\mathbf{0}, \mathbf{I})
+    \label{eq:reparam}
+\end{equation}
+where $\odot$ denotes element-wise multiplication, making the sampling operation differentiable with respect to the encoder parameters.
+
+\subsubsection{Dual Decoder}
+\label{sec:dual_decoder}
+
+A key architectural contribution is the \textit{dual decoder} that reconstructs both graph structure and gene expression from the latent representation, forcing the latent space to encode relational \textit{and} molecular information simultaneously.
+
+\paragraph{Adjacency Decoder.} Following Kipf and Welling \cite{kipf2016variational}, we reconstruct edge probabilities via an inner product decoder:
+\begin{equation}
+    \hat{A}_{ij} = \sigmoid(\mathbf{z}_i^\top \mathbf{z}_j)
+    \label{eq:adj_decoder}
+\end{equation}
+
+\paragraph{Expression Decoder.} A feedforward neural network maps each cell's latent representation back to its gene expression profile. To properly model the count-based nature of scRNA-seq data, we use a zero-inflated negative binomial (ZINB) likelihood \cite{lopez2018deep}, which accounts for both biological zeros and technical dropout events. The decoder network $f_\theta$ with two hidden layers outputs three gene-specific parameters per cell:
+\begin{align}
+    \boldsymbol{\rho}_i &= \text{softmax}\!\left(f_\theta^{(\rho)}(\mathbf{z}_i)\right) \cdot s_i  \label{eq:zinb_mu} \\
+    \boldsymbol{\theta} &= \exp\!\left(\mathbf{d}_\theta\right) \label{eq:zinb_theta} \\
+    \boldsymbol{\pi}_i &= \sigmoid\!\left(f_\theta^{(\pi)}(\mathbf{z}_i)\right) \label{eq:zinb_pi}
+\end{align}
+where $\boldsymbol{\rho}_i \in \R^G$ is the normalized mean expression scaled by the library size $s_i = \sum_g x_{ig}$, $\boldsymbol{\theta} \in \R^G$ is a vector of gene-specific dispersion parameters with learnable log-dispersion $\mathbf{d}_\theta$, and $\boldsymbol{\pi}_i \in (0,1)^G$ is the per-gene dropout probability.
+
+The ZINB log-likelihood for observed count $x_{ig}$ is:
+\begin{equation}
+    \log p(x_{ig} \mid \mathbf{z}_i) =
+    \begin{cases}
+        \log\!\left[\pi_{ig} + (1 - \pi_{ig})\left(\dfrac{\theta_g}{\theta_g + \rho_{ig}}\right)^{\!\theta_g}\right] & \text{if } x_{ig} = 0 \\[10pt]
+        \log(1 - \pi_{ig}) + \log \text{NB}(x_{ig};\, \rho_{ig},\, \theta_g) & \text{if } x_{ig} > 0
+    \end{cases}
+    \label{eq:zinb_ll}
+\end{equation}
+where the negative binomial component is:
+\begin{equation}
+    \log \text{NB}(x;\, \mu,\, \theta) = \log \Gamma(x + \theta) - \log \Gamma(\theta) - \log \Gamma(x + 1) + \theta \log\!\frac{\theta}{\theta + \mu} + x \log\!\frac{\mu}{\theta + \mu}
+    \label{eq:nb}
+\end{equation}
+
+This distributional choice is critical: a simple mean squared error reconstruction would impose Gaussian assumptions inappropriate for sparse, overdispersed count data, potentially obscuring the expression signatures of rare cell populations.
+
+
+\subsubsection{Contrastive Spatial Objective}
+\label{sec:contrastive}
+
+The cell-adaptive gate (\cref{sec:adaptive_fusion}) controls \textit{how much} spatial information enters the model, but does not explicitly require the latent space to \textit{discriminate} between cells based on spatial context. We introduce a contrastive learning objective that directly enforces this discrimination, operationalizing the biological principle that transcriptionally similar cells in distinct microenvironmental niches exhibit divergent functional states. This objective is active only for datasets with spatial coordinates ($\lambda_2 > 0$); for scRNA-seq-only datasets, $\lambda_2 = 0$.
+
+For each cell $i$, we define \textbf{positive pairs} $\mathcal{P}_i$ as its spatial neighbors, i.e., cells $j$ with $A^{\text{spatial}}_{ij} > 0$, and \textbf{hard negatives} $\mathcal{Q}_i$ as cells $k$ that are molecularly similar to $i$ (among the top-$k_{\text{neg}}$ nearest neighbors in PCA space) but spatially distant ($d_{\text{spatial}}(i, k) > r_{\text{far}}$), where $r_{\text{far}} = 5r$ and $k_{\text{neg}} = 10$.
+
+The contrastive loss follows the InfoNCE formulation \cite{oord2018representation}:
+\begin{equation}
+    \mathcal{L}_{\text{contrast}} = -\frac{1}{|\mathcal{P}|} \sum_{(i,j) \in \mathcal{P}} \log \frac{\exp\!\left(\text{sim}(\mathbf{z}_i, \mathbf{z}_j) / \tau\right)}{\exp\!\left(\text{sim}(\mathbf{z}_i, \mathbf{z}_j) / \tau\right) + \displaystyle\sum_{k \in \mathcal{Q}_i} \exp\!\left(\text{sim}(\mathbf{z}_i, \mathbf{z}_k) / \tau\right)}
+    \label{eq:contrastive}
+\end{equation}
+where $\text{sim}(\mathbf{a}, \mathbf{b}) = \mathbf{a}^\top \mathbf{b} / (\|\mathbf{a}\| \, \|\mathbf{b}\|)$ is cosine similarity and $\tau = 0.1$ is a temperature parameter controlling the sharpness of the distribution.
+
+The hard negative mining strategy is essential: random negatives would be dominated by easily distinguishable cells from different lineages, providing no gradient signal for the critical task of separating spatially distinct cells \textit{within the same transcriptional neighborhood}. By restricting negatives to molecularly similar but spatially distant cells, the contrastive loss targets exactly the failure mode of conventional clustering.
+
+
+\subsubsection{Combined Training Objective}
+
+The total training objective combines five terms:
+\begin{equation}
+    \mathcal{L}_{\text{total}} = \underbrace{\mathcal{L}_{\text{adj}}}_{\text{graph structure}} + \lambda_1 \underbrace{\mathcal{L}_{\text{expr}}}_{\text{molecular identity}} + \lambda_2 \underbrace{\mathcal{L}_{\text{contrast}}}_{\text{spatial discrimination}} + \beta \underbrace{\mathcal{L}_{\KL}}_{\text{regularization}} + \gamma \underbrace{\mathcal{L}_{\text{pred}}}_{\text{clinical prediction}}
+    \label{eq:total_loss}
+\end{equation}
+
+The active loss terms depend on data availability: $\lambda_2 > 0$ only when spatial coordinates are present, and $\gamma > 0$ only when clinical response annotations are available (the melanoma and NSCLC immunotherapy cohorts). All datasets use $\mathcal{L}_{\text{adj}}$, $\mathcal{L}_{\text{expr}}$, and $\mathcal{L}_{\KL}$.
+
+The individual loss components are defined as follows.
+
+\paragraph{Adjacency Reconstruction Loss.} Computing binary cross-entropy over all $N^2$ node pairs is prohibitively
+expensive for large graphs and dominated by the vast majority of non-edges. Following standard practice in graph
+representation learning, we use negative sampling: for each observed edge $(i,j)$ in the hybrid graph, we sample
+$n_{\text{neg}} = 5$ random non-edges as negatives:
+\begin{equation}
+    \mathcal{L}_{\text{adj}} = -\frac{1}{|\mathcal{E}|} \sum_{(i,j) \in \mathcal{E}} \log \hat{A}_{ij} \;-\;
+\frac{1}{|\mathcal{E}| \cdot n_{\text{neg}}} \sum_{(i,j') \in \mathcal{E}^{-}} \log(1 - \hat{A}_{ij'})
+    \label{eq:adj_loss}
+\end{equation}
+where $\mathcal{E}$ is the set of observed edges and $\mathcal{E}^{-}$ is the set of sampled negative pairs with
+$|\mathcal{E}^{-}| = n_{\text{neg}} \cdot |\mathcal{E}|$. This reduces complexity from $O(N^2)$ to $O(|\mathcal{E}| \cdot
+n_{\text{neg}})$ while providing an unbiased estimate of the full cross-entropy objective.
+
+\paragraph{Expression Reconstruction Loss.} The negative ZINB log-likelihood over all cells and genes:
+\begin{equation}
+    \mathcal{L}_{\text{expr}} = -\frac{1}{N} \sum_{i=1}^{N} \sum_{g=1}^{G} \log p(x_{ig} \mid \mathbf{z}_i)
+    \label{eq:expr_loss}
+\end{equation}
+as defined in \cref{eq:zinb_ll}.
+
+\paragraph{KL Divergence Regularization.} Encourages the approximate posterior to remain close to a standard normal prior:
+\begin{equation}
+    \mathcal{L}_{\KL} = -\frac{1}{2N} \sum_{i=1}^{N} \sum_{d=1}^{D} \left(1 + \log \sigma_{id}^2 - \mu_{id}^2 - \sigma_{id}^2\right)
+    \label{eq:kl_loss}
+\end{equation}
+
+\paragraph{Prediction Loss.} Binary cross-entropy for immunotherapy response prediction, described in \cref{sec:prediction}. This term is included only during joint training on datasets with clinical response annotations; for unsupervised analysis, $\gamma = 0$.
+
+\paragraph{Hyperparameter Balancing and Latent Space Integrity.} The loss weights $\lambda_1, \lambda_2, \beta, \gamma$ control the relative contribution of each objective. A central design concern is that introducing the prediction objective $\mathcal{L}_{\text{pred}}$ may cause the latent space to collapse into a purely task-optimized representation that sacrifices generative structure, degrading reconstruction quality and rare cell sensitivity in favor of classification accuracy. We address this through a two-phase training strategy with explicit reconstruction monitoring.
+
+In Phase~1 (Representation Learning), the model trains with $\gamma = 0$ for 300 epochs, optimizing $\mathcal{L}_{\text{adj}} + \lambda_1 \mathcal{L}_{\text{expr}} + \lambda_2 \mathcal{L}_{\text{contrast}} + \beta \mathcal{L}_{\KL}$. This ensures the latent space captures biological structure before clinical supervision is introduced. At the end of Phase~1, we record baseline metrics: validation reconstruction losses $\mathcal{L}_{\text{adj}}^{(1)}$ and $\mathcal{L}_{\text{expr}}^{(1)}$, rare cell recall $R^{(1)}$ (via the KL-based detection described in \cref{sec:rare_cell}), and latent space quality (silhouette score $S^{(1)}$).
+
+In Phase~2 (Joint Clinical Fine-Tuning), $\mathcal{L}_{\text{pred}}$ is introduced with $\gamma > 0$ and training continues for up to 200 epochs at a reduced learning rate ($10\times$ reduction). Phase~2 is applied to the datasets with patient-level response annotations (melanoma and NSCLC immunotherapy cohorts). Throughout Phase~2, $\mathcal{L}_{\text{adj}}$, $\mathcal{L}_{\text{expr}}$, and rare cell recall are continuously monitored on the validation set. If reconstruction losses degrade beyond a tolerance threshold ($\mathcal{L}_{\text{adj}} > 1.1 \cdot \mathcal{L}_{\text{adj}}^{(1)}$ or $\mathcal{L}_{\text{expr}} > 1.1 \cdot \mathcal{L}_{\text{expr}}^{(1)}$), $\gamma$ is automatically halved to prevent the prediction objective from dominating representation learning. Training halts if reconstruction losses cannot be maintained within tolerance after three consecutive $\gamma$ reductions.
+
+This monitoring protocol provides an explicit safeguard against latent space collapse. By tracking reconstruction quality and rare cell sensitivity \textit{throughout} joint training rather than only evaluating the final model, we ensure that the prediction objective refines the biological representations rather than overwriting them. We formally verify this through a frozen-versus-joint ablation (\cref{sec:ablations}), comparing a frozen encoder (Phase 1 representations fixed, only the pooling and classification head trained) against the full joint training to quantify whether end-to-end gradients improve prediction while preserving generative structure.
+
+Initial values $\lambda_1 = 1.0$, $\lambda_2 = 0.5$, $\beta = 0.01$ (with linear warm-up over 50 epochs), and $\gamma = 0.1$ are refined through Bayesian optimization on validation loss using Optuna, with 50 trials per dataset.
+
+
+\subsubsection{Architecture Hyperparameters and Optimization}
+
+The encoder uses hidden dimension 64 for the intermediate layer $\mathbf{H}^{(1)}$, latent dimension $D = 32$, $H = 4$ attention heads per GAT layer, and dropout probability 0.2 after each layer. The expression decoder uses two hidden layers of dimensions 128 and 256 with batch normalization and ELU activation. The Adam optimizer \cite{kingma2014adam} is used with initial learning rate $10^{-3}$ and cosine annealing schedule. For datasets exceeding GPU memory, mini-batch training with neighbor sampling \cite{hamilton2017inductive} processes subsets of target nodes with their sampled 2-hop neighborhoods.
+
+Training uses early stopping with patience of 50 epochs on validation reconstruction loss. For datasets with patient-level annotations (melanoma and NSCLC immunotherapy cohorts), data is split 70\%/15\%/15\% into training, validation, and test sets at the \textit{patient level}, ensuring all cells from a given patient belong to the same split to prevent data leakage. For datasets without patient-level annotations, splits are performed at the sample level where multiple samples exist, or by random cell-level partitioning for single-sample datasets.
+
+
+\subsection{Downstream Analysis and Biological Interpretation}
+
+\subsubsection{Uncertainty-Aware Clustering and Cell State Discovery}
+
+The learned latent representations $\mathbf{Z}$ serve as input for cell state identification via the Leiden algorithm \cite{traag2019louvain}. Unlike standard practice, we exploit the probabilistic nature of the VAE latent space in the clustering step itself.
+
+Clustering operates on the \textit{learned attention-weighted adjacency} rather than constructing a new $k$-NN graph in latent space, ensuring that the relational structure discovered during GVAE training directly informs community detection rather than being discarded and rebuilt post hoc. We additionally incorporate the learned per-cell variance $\boldsymbol{\sigma}_i^2$ as an uncertainty weight. For each cell $i$, we define a confidence score:
+\begin{equation}
+    c_i = \exp\!\left(-\frac{1}{D}\sum_{d=1}^{D} \sigma_{id}^2\right)
+    \label{eq:confidence}
+\end{equation}
+where cells with low latent variance (high $c_i$) are confidently placed and anchor the cluster structure, while high-variance cells receive soft assignments proportional to their proximity to each cluster centroid in latent space. Specifically, for high-uncertainty cells ($c_i < c_{\text{thresh}}$, where $c_{\text{thresh}}$ is the 20th percentile of the confidence distribution), we assign soft cluster memberships:
+\begin{equation}
+    p(i \in \text{cluster } m) = \frac{\exp(-\|\boldsymbol{\mu}_i - \boldsymbol{\mu}_m^{(c)}\|^2 / 2\bar{\sigma}_i^2)}{\sum_{m'} \exp(-\|\boldsymbol{\mu}_i - \boldsymbol{\mu}_{m'}^{(c)}\|^2 / 2\bar{\sigma}_i^2)}
+    \label{eq:soft_assign}
+\end{equation}
+where $\boldsymbol{\mu}_m^{(c)}$ is the centroid of cluster $m$ computed from high-confidence cells and $\bar{\sigma}_i^2 = \frac{1}{D}\sum_d \sigma_{id}^2$.
+
+Resolution parameters $\gamma \in \{0.5, 1.0, 1.5, 2.0\}$ are evaluated by silhouette score, stability across 10 random initializations (assessed via Adjusted Rand Index), and biological coherence of marker gene expression.
+
+Discovered cell states are characterized through differential expression analysis (Wilcoxon rank-sum test, Benjamini-Hochberg FDR $< 0.01$, $|\log_2\text{FC}| > 1$), pathway enrichment (Gene Set Enrichment Analysis against MSigDB Hallmark and Gene Ontology Biological Process databases), and automated cell type annotation (SingleR \cite{aran2019reference} with Human Primary Cell Atlas reference, cross-validated against canonical lineage markers).
+
+
+\subsubsection{KL-Divergence-Based Rare Cell Detection}
+\label{sec:rare_cell}
+
+Standard clustering algorithms exhibit inherent bias toward abundant populations, as density-based community detection subsumes rare states into neighboring abundant clusters. We propose a VAE-native rare cell detection method that exploits the per-cell KL divergence as a principled anomaly score, requiring no additional computation beyond what the training procedure already provides.
+
+The per-cell KL divergence measures how much each cell's approximate posterior deviates from the standard normal prior:
+\begin{equation}
+    \KL_i = \frac{1}{2} \sum_{d=1}^{D} \left(\mu_{id}^2 + \sigma_{id}^2 - \log \sigma_{id}^2 - 1\right)
+    \label{eq:per_cell_kl}
+\end{equation}
+
+Cells with high $\KL_i$ are those the model cannot compress into the prior distribution; they occupy unusual regions of the latent manifold that deviate from the population-level structure. We define a normalized rare cell score:
+\begin{equation}
+    r_i = \frac{\KL_i - \hat{\mu}_{\KL}}{\hat{\sigma}_{\KL}}
+    \label{eq:rare_score}
+\end{equation}
+where $\hat{\mu}_{\KL}$ and $\hat{\sigma}_{\KL}$ are the mean and standard deviation of the KL distribution across all cells. Cells exceeding a threshold $r_i > \eta$ (default $\eta = 2$, corresponding approximately to the 97.5th percentile under Gaussian assumptions) are flagged as \textit{rare cell candidates}.
+
+The rare cell detection procedure begins by computing $r_i$ for all cells and identifying the candidate set $\mathcal{R} = \{i : r_i > \eta\}$. The candidates are then sub-clustered using Leiden at elevated resolution ($\gamma = 2.0$) on the subgraph induced by $\mathcal{R}$ in the learned latent space. Because abundant populations have been excluded, the algorithm operates on a reduced, enriched population where rare states constitute a substantial fraction. Each resulting sub-cluster is characterized through differential expression against both the other rare candidates and the full dataset, identifying markers specific to each rare state. Biological relevance is then validated through pathway enrichment, spatial localization analysis, and association with clinical outcomes.
+
+This two-stage approach directly addresses the failure mode identified in the introduction: rather than relying on a single clustering resolution to simultaneously resolve both abundant populations spanning thousands of cells and rare states comprising dozens, we decompose the problem into complementary steps; global clustering for major populations, targeted re-clustering for rare states.
+
+
+\subsubsection{Spatial Localization and Gate Interpretation}
+
+For cell states identified in spatial transcriptomics data, we characterize spatial organization patterns through gate-derived importance maps and explicit validation of spatial restriction.
+
+\paragraph{Gate-Derived Spatial Importance Maps.} The learned cell-adaptive gate values $g_i$ (\cref{eq:gate}) are projected onto tissue spatial coordinates, producing maps that reveal where in the tissue the model requires spatial context for accurate cell state characterization. Regions where $g_i$ is low (high spatial weight) indicate cells whose identity depends critically on microenvironmental context; these are candidate spatially-restricted niches. We test for non-random spatial patterns in gate values using Moran's $I$ statistic and identify gate value clusters through spatial autocorrelation analysis. This analysis is performed on the colorectal and NSCLC Visium HD datasets, which provide native tissue coordinates.
+
+\paragraph{Validation of Spatial Restriction.} Cell states discovered through the hybrid graph are tested for spatial restriction by comparing to clustering results from molecular-only ($g_i = 1 \;\forall\, i$) and spatial-only ($g_i = 0 \;\forall\, i$) graph ablations. States that emerge exclusively in the hybrid analysis represent truly spatially-restricted populations invisible to conventional approaches. For these states, we compute nearest-neighbor enrichment scores quantifying preferential co-localization with other cell types, assessed against a null distribution from 1{,}000 spatial permutations.
+
+
+\subsubsection{Attention-Based Interaction Network Analysis}
+
+The learned GAT attention weights $\alpha_{ij}^k$ provide interpretable information about which cellular interactions the model identifies as important for determining cell state. We formalize the extraction and analysis of these weights into a cell-type interaction network.
+
+\paragraph{Attention Selectivity Score.} Raw attention weights are normalized per-cell by the softmax and are therefore confounded by neighborhood size: a cell with 5 neighbors naturally assigns higher per-neighbor attention than a cell with 50 neighbors. To control for this, we define an attention selectivity score for each cell $i$ as the KL divergence between its observed attention distribution and a uniform distribution over its neighbors:
+\begin{equation}
+    S_i = \sum_{j \in \mathcal{N}(i)} \alpha_{ij} \log \frac{\alpha_{ij}}{1 / |\mathcal{N}(i)|}
+    \label{eq:selectivity}
+\end{equation}
+where high $S_i$ indicates that cell $i$ attends selectively to specific neighbors rather than averaging uniformly. Selectivity scores are averaged across attention heads.
+
+\paragraph{Cell-Type Interaction Network.} For cells with high selectivity ($S_i$ above the 75th percentile), we identify the top-attended neighbor and record the directed interaction as a (source cell type, target cell type) pair. Aggregating across the tissue produces a weighted, directed cell-type interaction network where edge weight $W_{m \to n}$ represents the frequency with which cells of type $m$ are the top-attended neighbor of cells of type $n$, normalized by the number of $m$-$n$ neighbor pairs (opportunity normalization). This captures the degree to which cells of type $n$ preferentially attend to neighbors of type $m$ over other available neighbors.
+
+\paragraph{Biological Validation.} We test whether high-attention edges are enriched for known ligand-receptor co-expression beyond what spatial proximity alone predicts. For each cell pair $(i, j)$ connected by a high-attention edge ($\alpha_{ij}$ above the 90th percentile), we test for co-expression of ligand-receptor pairs from CellChatDB \cite{jin2021inference} and CellPhoneDB \cite{efremova2020cellphonedb}. Enrichment is computed as the odds ratio of ligand-receptor co-expression among high-attention pairs versus distance-matched random pairs (matched on $d_{\text{spatial}}$ within $\pm 5\,\mu$m), with significance assessed by Fisher's exact test.
+
+
+\subsubsection{End-to-End Immunotherapy Response Prediction}
+\label{sec:prediction}
+
+For datasets with patient-level immunotherapy response annotations (Table~\ref{tab:datasets}), we develop an end-to-end differentiable prediction pipeline that jointly optimizes representation learning and clinical outcome prediction. The melanoma cohort (32 patients treated with anti-PD-1, anti-CTLA-4, or combination checkpoint blockade) serves as the discovery cohort, and the NSCLC cohort (243 patients receiving neoadjuvant anti-PD-1 plus chemotherapy, labeled by major pathological response) provides independent validation across cancer types and treatment regimens.
+
+\paragraph{Attention-Based Patient Pooling.} Cell-level latent representations are aggregated to patient-level through a learned attention pooling mechanism:
+\begin{equation}
+    a_i = \frac{\exp\!\left(\mathbf{w}_a^\top \tanh(\mathbf{W}_a \mathbf{z}_i + \mathbf{b}_a)\right)}{\sum_{j \in \mathcal{V}_p} \exp\!\left(\mathbf{w}_a^\top \tanh(\mathbf{W}_a \mathbf{z}_j + \mathbf{b}_a)\right)}
+    \label{eq:pool_attention}
+\end{equation}
+\begin{equation}
+    \mathbf{h}_p = \sum_{i \in \mathcal{V}_p} a_i \, \mathbf{z}_i
+    \label{eq:patient_embed}
+\end{equation}
+where $\mathcal{V}_p$ is the set of all cells belonging to patient $p$, $\mathbf{W}_a \in \R^{D \times D}$ and $\mathbf{w}_a \in \R^{D}$ are learnable parameters, and $a_i \in (0, 1)$ is the importance weight of cell $i$ for predicting patient $p$'s outcome. The pooling attention is conceptually distinct from the GAT encoder attention: GAT attention determines which neighbors matter for defining a cell's state, while pooling attention determines which cells matter for predicting a patient's response. These address different biological questions and yield different answers.
+
+\paragraph{Response Classifier.} The patient-level embedding $\mathbf{h}_p$ is passed through a classification head:
+\begin{equation}
+    \hat{y}_p = \sigmoid(\mathbf{w}_p^\top \mathbf{h}_p + b_p)
+    \label{eq:classifier}
+\end{equation}
+\begin{equation}
+    \mathcal{L}_{\text{pred}} = -\frac{1}{|\mathcal{P}|} \sum_{p \in \mathcal{P}} \left[ y_p \log \hat{y}_p + (1 - y_p) \log(1 - \hat{y}_p) \right]
+    \label{eq:pred_loss}
+\end{equation}
+where $y_p \in \{0, 1\}$ is the binary response label and $\mathcal{P}$ is the set of patients with response annotations.
+
+During Phase 2 training (\cref{eq:total_loss}), the prediction loss backpropagates through the pooling layer, through the GVAE encoder, and into the graph construction gate. This means the entire pipeline; from graph fusion to cell encoding to patient-level prediction; is jointly optimized. We hypothesize that this joint optimization incentivizes the model to assign distinctive latent representations to rare immunosuppressive cells that are predictive of resistance, simultaneously improving rare cell detection and clinical prediction. This hypothesis is explicitly tested by comparing rare cell recall (via the KL-based detection in \cref{sec:rare_cell}) at the end of Phase 1 ($R^{(1)}$, before prediction gradients) versus the end of Phase 2 ($R^{(2)}$, after joint training). An increase in $R^{(2)}$ relative to $R^{(1)}$ without degradation in reconstruction quality would provide direct evidence that clinical supervision enhances biological discovery rather than compromising it.
+
+\paragraph{Interpretability.} The pooling attention weights $a_i$ provide a per-cell importance ranking for each patient. Projecting $a_i$ onto tissue spatial coordinates produces a \textit{predictive importance map} identifying which cells and tissue regions the model considers most informative for the clinical outcome. Aggregating $a_i$ by cell type reveals which TME populations drive predictions at the cohort level.
+
+\paragraph{Baseline Comparison.} To quantify the advantage of end-to-end prediction, we compare against a feature-engineered baseline: logistic regression with $L_1$ regularization trained on hand-crafted features including cell type proportions, Shannon diversity index, and mean latent vector per patient. Performance differences between the end-to-end and baseline approaches are assessed by paired $t$-test on cross-validation fold AUROCs.
+
+
+\subsubsection{Model Validation}
+
+Predictive performance is evaluated through nested cross-validation with an outer 5-fold patient-level split for performance estimation and an inner 3-fold split for hyperparameter tuning, with stratified sampling to maintain responder/non-responder proportions. We report area under the ROC curve (AUROC), area under the precision-recall curve (AUPRC), balanced accuracy, sensitivity, and specificity, with 95\% confidence intervals from 1{,}000 bootstrap iterations.
+
+To establish that observed performance exceeds chance, we perform permutation testing: the prediction pipeline is retrained 1{,}000 times with randomly shuffled response labels, generating a null distribution of AUROC values. Statistical significance is assessed as the fraction of permutation AUROCs exceeding the observed AUROC ($p < 0.05$).
+
+
+\subsection{Ablation Studies}
+\label{sec:ablations}
+
+Systematic ablation experiments isolate the contribution of each methodological component. All ablations use identical preprocessing, training schedules, and evaluation protocols, varying only the specified component.
+
+The \textbf{graph fusion ablation} compares a molecular-only graph ($g_i = 1 \;\forall\, i$), a spatial-only graph ($g_i = 0 \;\forall\, i$), static hybrid graphs with fixed $\alpha \in \{0.3, 0.5, 0.7\}$, and the learned cell-adaptive gate. These are evaluated on clustering ARI against reference cell type annotations, rare cell recall, and spatial coherence of discovered states. This ablation is performed on the Visium HD datasets where both molecular and spatial graphs are available.
+
+The \textbf{decoder ablation} tests adjacency reconstruction only ($\lambda_1 = 0$) against dual reconstruction with Gaussian likelihood and dual reconstruction with ZINB likelihood. Latent space quality is measured by silhouette score and kBET batch mixing, alongside gene expression correlation between input and reconstruction.
+
+The \textbf{contrastive loss ablation} trains the model with and without $\mathcal{L}_{\text{contrast}}$ ($\lambda_2 = 0$), measuring separation of transcriptionally similar but spatially distinct populations through the ratio of inter-niche to intra-niche distances in latent space for known spatially-restricted cell types. This ablation is performed on the Visium HD datasets.
+
+The \textbf{rare cell detection ablation} compares standard Leiden clustering across all cells against KL-based detection with sub-clustering, evaluated by recall of known rare immunosuppressive populations (M2-like macrophages, exhausted T\textsubscript{reg} cells, MDSCs) at controlled false discovery rates.
+
+The \textbf{prediction pipeline ablation} compares end-to-end differentiable prediction against hand-engineered features with logistic regression baseline, evaluated by AUROC, AUPRC, and feature importance interpretability. This ablation is performed on both the melanoma and NSCLC immunotherapy cohorts.
+
+The \textbf{frozen-versus-joint training ablation} directly tests whether clinical supervision improves or degrades biological representations by comparing a frozen encoder (Phase~1 representations fixed, only pooling and classification head trained) against full joint end-to-end training (backpropagation through encoder during Phase~2). We report prediction performance (AUROC, AUPRC), reconstruction quality ($\mathcal{L}_{\text{adj}}$, $\mathcal{L}_{\text{expr}}$ on held-out validation data, per-gene Pearson correlation between input and reconstructed expression), and rare cell sensitivity (KL-based rare cell recall $R^{(1)}$ vs.\ $R^{(2)}$ for known immunosuppressive populations). The intended outcome is that joint training improves prediction without degrading reconstruction or rare cell recall. If joint training degrades reconstruction quality beyond the 10\% tolerance threshold despite $\gamma$ adaptation, the frozen encoder serves as the recommended configuration, establishing a principled fallback rather than an arbitrary design choice. This ablation is performed on both the melanoma and NSCLC immunotherapy cohorts.
+
+The \textbf{encoder ablation} replaces the GAT encoder with a standard graph convolutional network (GCN) encoder lacking attention, evaluated by clustering quality, prediction performance, and availability of interpretable attention weights.
+
+
+\subsection{Biological Validation of Rare Cell States}
+
+To ensure that computationally identified rare populations represent genuine biological entities rather than technical artifacts, we validate through simulation, cross-dataset concordance, and clinical association.
+
+\paragraph{Simulation Study.} We generate synthetic single-cell datasets using Splatter \cite{zappia2017splatter} with controlled rare population frequencies (1\%, 2\%, 5\% of total cells) across varying levels of transcriptomic distinctness (effect sizes of 0.5, 1.0, 2.0 in log-fold-change). Known spatial structure is imposed by assigning rare populations to defined tissue regions. Our method's rare cell recall and precision are benchmarked against GiniClust3 \cite{tsoucas2018giniclust2} and RaceID \cite{grun2015single} across all parameter combinations, establishing sensitivity curves as a function of population rarity and effect size.
+
+\paragraph{Cross-Dataset Concordance.} Rare cell states identified in one dataset are tested for reproducibility in independent datasets of the same cancer type. We quantify concordance through the overlap coefficient of marker gene sets (Jaccard index) and correlation of latent space signatures, requiring both molecular similarity and consistent spatial localization patterns for a state to be considered validated.
+
+\paragraph{Clinical Association.} For datasets with immunotherapy response annotations (melanoma and NSCLC cohorts), validated rare cell states are tested for clinical relevance. The abundance of each rare population (as a fraction of total TME cells) is associated with immunotherapy response via logistic regression, adjusting for therapy type where applicable (anti-PD-1, anti-CTLA-4, combination in melanoma; anti-PD-1 plus chemotherapy in NSCLC). Associations are tested independently in each cohort to assess cross-cancer reproducibility. Rare states with significant clinical associations ($p < 0.05$ after multiple testing correction) in at least one cohort are prioritized for biological characterization and mechanistic follow-up; states significant in both cohorts represent the strongest candidates for pan-cancer immunosuppressive biomarkers.
+
+
+\subsection{Statistical Rigor and Reproducibility}
+
+All differential expression and pathway enrichment analyses apply Benjamini-Hochberg FDR correction. Effect sizes are reported alongside $p$-values for all statistical tests, with 95\% confidence intervals from bootstrap resampling (1{,}000 iterations). For predictive modeling, permutation testing establishes significance above chance level. All stochastic procedures use documented random seeds for exact reproducibility.
+
+Complete source code, trained model weights, preprocessed data, and reproducibility scripts that regenerate all figures and tables will be released as an open-source software package with comprehensive documentation and tutorials. The package will include modular implementations of each pipeline component, enabling users to apply the framework to new datasets or substitute individual components as needed.
+
+
+
+\appendix
+
+\section{Implementation Details}
+\label{app:implementation}
+
+\paragraph{Graph Construction.} For $N > 100{,}000$ cells, $k$-NN uses Annoy (50 trees, recall $\geq 0.95$ validated on 10\% exact subsample). Adjacency matrices use CSR sparse format; GAT layers use PyTorch Sparse / cuSPARSE. The cell-adaptive gate (\cref{eq:gate}) is a single batched linear transform in $O(Nd)$. Hybrid fusion (\cref{eq:hybrid_matrix}) scales each CSR row by its gate value, preserving sparsity. The resulting adjacency is asymmetric ($g_i \neq g_j$); GAT handles directed graphs natively. Hard negatives for $\mathcal{L}_{\text{contrast}}$ reuse the molecular $k$-NN graph (minimum 3 per cell, threshold relaxed to $3r$ if needed).
+
+\paragraph{Hyperparameter Search.} Bayesian optimization via Optuna (TPE, 50 trials per dataset: 10 random $+$ 40 guided, 100 epochs each with patience 20). Validation objective: $\mathcal{J} = \mathcal{L}_{\text{adj}}^{\text{val}} + \lambda_1 \mathcal{L}_{\text{expr}}^{\text{val}} + \lambda_2 \mathcal{L}_{\text{contrast}}^{\text{val}} + \beta \mathcal{L}_{\KL}^{\text{val}}$. Top-3 retrained at full budget. Search spaces: $k \in \{10,15,20,30\}$; $D \in \{16,32,64\}$; $H \in \{1,2,4,8\}$; $\lambda_1 \in \{0.1,0.5,1.0,2.0\}$; $\lambda_2 \in \{0.1,0.5,1.0\}$; $\beta \in \{0.001,0.01,0.1\}$; $\gamma \in \{0.01,0.05,0.1,0.5\}$; $\tau \in \{0.05,0.1,0.2,0.5\}$; $\eta \in \{1.5,2.0,2.5,3.0\}$; $k_{\text{neg}} \in \{5,10,20\}$. The static $\alpha$ is eliminated (replaced by the learned gate).
+
+\paragraph{Computational Complexity.} All novel components scale linearly with $N$. The expression decoder dominates for large gene panels: $O(B \cdot H_2 \cdot G)$ per mini-batch. At $B{=}512$, $G{=}5{,}000$, $H_2{=}256$, this yields ${\sim}6.5 \times 10^8$ FLOPs/batch (${\sim}0.03$\,ms on A100), confirming tractability beyond 500K cells. Full complexity summary:
+
+\begin{table}[h]
+\centering
+\caption{Computational complexity ($\dagger$ = novel components).}
+\label{tab:complexity}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Component} & \textbf{Complexity} \\
+\midrule
+$k$-NN (ANN) / Spatial graph & $O(N \log N \cdot d)$ \\
+$^\dagger$Cell-adaptive gate & $O(Nd)$ \\
+GAT encoder (2 layers) & $O(N \cdot k \cdot D \cdot H)$ \\
+Adj.\ decoder (neg.\ sampling) & $O(N \cdot k \cdot n_{\text{neg}} \cdot D)$ \\
+$^\dagger$Expr.\ decoder + ZINB & $O(N \cdot H_2 \cdot G)$ \\
+$^\dagger$Contrastive loss & $O(N \cdot k_{\text{neg}} \cdot D)$ \\
+$^\dagger$KL detection + Attn.\ pooling & $O(N \cdot D)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
