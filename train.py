@@ -71,6 +71,20 @@ def make_serializable(obj):
 
 def build_model(config, data, use_predictor):
     return GVAEModel(
+        n_features=data.x.size(1),
+        n_genes=data.x_raw.size(1),
+        hidden_dim=config['hidden_dim'],
+        latent_dim=config['latent_dim'],
+        n_heads=config['n_heads'],
+        dropout=config['dropout'],
+        n_neg_samples=config['n_neg_samples'],
+        use_predictor=use_predictor,
+        encoder_type=config.get('encoder_type', 'gat'),
+        decoder_type=config.get('decoder_type', 'zinb'),
+        gate_mode=config.get('gate_mode', 'learned'),
+        spatial_bias=config.get('spatial_bias', 0.0),
+    )
+
 from src.analysis import RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer
 from src.data_utils import prepare_graph_data, create_synthetic_data
 

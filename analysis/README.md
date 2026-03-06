@@ -7,7 +7,7 @@ Right now, the spatial coordinates used are just **fake/placeholder data**. Once
 
 ## Data Source
 
-`analyze.py` reads directly from `../outputs/` (the files produced by `train.py`):
+`analyze.py` reads directly from `../outputs/`, files produced by `train.py`:
 
 - `embeddings.npy`
 - `cluster_labels.npy`
@@ -18,9 +18,31 @@ Right now, the spatial coordinates used are just **fake/placeholder data**. Once
 
 No model retraining happens in `analyze.py`.
 
+## Rare Cell Detection Benchmarking
+The `rare_cell_benchmark.py` script evaluates GVAE's KL-based rare cell detection against established biological baselines through:
+
+1. Marker-based annotation
+2. CISC-style baseline
+3. scSynO-style baseline
+
+However, marker-based annotation + scSyn0-style baseline require real data with gene expression.
+
+## Metrics:
+
+**Precision**: Of cells flagged as rare, how many are truly rare?
+**Recall**: Of truly rare cells, how many did we find?
+**F1 Score**: Harmonic mean of precision and recall
+**AUROC**: How well the method ranks rare vs. non-rare cells
+**Overlap**: Cells identified by both GVAE and baseline (high-confidence candidates)
+
+## Expected Behavior (for now)
+
+On synthetic data: Marker-based methods return None (as expected—no gene expression)
+On real data (GSE243280, melanoma datasets): All baselines become active and provide meaningful comparisons
+
 ## Run Order
 
-From `gvae-tme/`:
+From `gvae-tme/analysis`:
 
 ```bash
 python train.py
@@ -29,9 +51,9 @@ python analyze.py
 
 ## Files Written Here
 
-- `fig1_umap.png`
-- `fig2_spatial.png`
-- `adata.h5ad`
+- `fig1_umap.png` - Latent space visualization
+- `fig2_spatial.png` - Spatial distribution
+- `adata.h5ad` - Annotated object for downstream analysis
 
 ## Important Caveat
 
