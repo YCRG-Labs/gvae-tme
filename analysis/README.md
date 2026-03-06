@@ -25,15 +25,15 @@ The `rare_cell_benchmark.py` script evaluates GVAE's KL-based rare cell detectio
 2. CISC-style baseline
 3. scSynO-style baseline
 
-However, marker-based annotation + scSyn0-style baseline require real data with gene expression.
+However, marker-based annotation + scSyn0-style baseline requires real data with gene expression.
 
 ## Metrics:
 
-**Precision**: Of cells flagged as rare, how many are truly rare?
-**Recall**: Of truly rare cells, how many did we find?
-**F1 Score**: Harmonic mean of precision and recall
-**AUROC**: How well the method ranks rare vs. non-rare cells
-**Overlap**: Cells identified by both GVAE and baseline (high-confidence candidates)
+- **Precision**: Of cells flagged as rare, how many are truly rare?
+- **Recall**: Of truly rare cells, how many did we find?
+- **F1 Score**: Harmonic mean of precision and recall
+- **AUROC**: How well the method ranks rare vs. non-rare cells
+- **Overlap**: Cells identified by both GVAE and baseline (high-confidence candidates)
 
 ## Expected Behavior (for now)
 
