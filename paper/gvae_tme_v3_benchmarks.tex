@@ -117,7 +117,14 @@ Prediction of immunotherapy response remains one of the most pressing challenges
 
 \subsection{Overview of Analytical Framework}
 
-Our methodological approach integrates single-cell RNA sequencing and spatial transcriptomics data through a graph-based deep learning framework centered on variational autoencoders. The analytical pipeline proceeds through six major stages: (1) data acquisition, quality control, and preprocessing; (2) construction of cellular graphs encoding molecular similarity and spatial adjacency with a learned cell-adaptive gate; (3) training of graph variational autoencoders with multi-component loss functions to learn low-dimensional latent representations; (4) two-phase training with representation learning followed by clinical fine-tuning; (5) downstream analysis including uncertainty-aware clustering, KL-based rare cell detection, immunosuppressive signature validation, and clinical association testing; and (6) benchmarking against baseline methods and cross-dataset transfer evaluation. This section details each component with sufficient specificity to enable independent reproduction.
+Our methodological approach integrates single-cell RNA sequencing and spatial transcriptomics data through a graph-based deep learning framework centered on variational autoencoders. The analytical pipeline proceeds through six major stages (Figure~\ref{fig:framework}): (1) data acquisition, quality control, and preprocessing; (2) construction of cellular graphs encoding molecular similarity and spatial adjacency with a learned cell-adaptive gate; (3) training of graph variational autoencoders with multi-component loss functions to learn low-dimensional latent representations; (4) two-phase training with representation learning followed by clinical fine-tuning; (5) downstream analysis including uncertainty-aware clustering, KL-based rare cell detection, immunosuppressive signature validation, and clinical association testing; and (6) benchmarking against baseline methods and cross-dataset transfer evaluation. This section details each component with sufficient specificity to enable independent reproduction.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figuresGVAE/Framework.png}
+\caption{\textbf{Overview of the GVAE framework for tumor microenvironment analysis.} The pipeline proceeds from input data modalities (scRNA-seq count matrices and spatial coordinates) through graph construction with a learned cell-adaptive gate, to the GVAE encoder-decoder architecture producing latent cell embeddings. A two-phase training protocol first learns biological representations, then fine-tunes for clinical prediction. Downstream modules perform rare cell detection via KL divergence thresholding, attention-based interaction network analysis, end-to-end immunotherapy response prediction via attention pooling, and uncertainty-aware clustering with immunosuppressive signature validation.}
+\label{fig:framework}
+\end{figure}
 
 \subsection{Data Acquisition and Preprocessing}
 
@@ -206,7 +213,14 @@ where $g_i$ is the gate value of the \emph{target} node. This formulation allows
 
 \paragraph{Spatial bias initialization.} For applications specifically targeting spatially-restricted immunosuppressive niches, the gate bias may be initialized to $b = -1.0$ rather than zero, yielding an initial gate value $g_i = \sigma(-1.0) \approx 0.27$ for all cells before training. This corresponds to a spatial weight of $1 - g_i \approx 0.73$, encouraging the model to initially favor spatial adjacency information while retaining full learnability through gradient-based optimization. This initialization is motivated by the biological observation that immunosuppressive niches are defined primarily by spatial co-localization of regulatory T cells, myeloid-derived suppressor cells, and tumor-associated macrophages rather than by transcriptomic similarity alone. We evaluate this spatial bias initialization as an ablation (Section~\ref{sec:ablations}), comparing default initialization ($b = 0$, yielding $g_i \approx 0.5$) against biased initialization ($b = -1.0$) on rare cell detection recall and spatial niche discovery.
 
-To validate that the learned gate values reflect genuine spatial structure rather than arbitrary variation, we assess spatial coherence through Moran's I statistic computed over the gate values and tissue coordinates, with significance confirmed via a permutation test with 1,000 iterations (Section~\ref{sec:spatial_validation}).
+To validate that the learned gate values reflect genuine spatial structure rather than arbitrary variation, we assess spatial coherence through Moran's I statistic computed over the gate values and tissue coordinates, with significance confirmed via a permutation test with 1,000 iterations (Section~\ref{sec:spatial_validation}). Figure~\ref{fig:gate} illustrates the cell-adaptive gate mechanism, showing how molecular and spatial edges are combined through the learned per-cell gate value into hybrid weights for the graph attention encoder.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\textwidth]{figuresGVAE/ThreePanelGate.png}
+\caption{\textbf{Cell-adaptive gate mechanism for hybrid graph fusion.} \textbf{(A)}~Molecular edges (blue) connect transcriptionally similar cells via $k$-NN in PCA space, while spatial edges (orange) connect physically adjacent cells. \textbf{(B)}~Learned gate values $g_i$ projected onto tissue coordinates reveal spatial structure: cells in the tumor core rely on molecular similarity ($g \approx 0.92$), while cells at the invasive margin and immune interface rely on spatial context ($g \approx 0.28$). \textbf{(C)}~For each target cell $i$, the gate value $g_i$ weights molecular and spatial edge contributions via $w_{\text{hybrid}}(j,i) = g_i \cdot w_{\text{mol}}(j,i) + (1 - g_i) \cdot w_{\text{spatial}}(j,i)$, producing hybrid weights for subsequent GAT attention computation.}
+\label{fig:gate}
+\end{figure}
 
 \subsubsection{Contrastive Pair Mining}
 \label{sec:contrastive_mining}
@@ -326,13 +340,20 @@ Default loss weights are $\lambda_1 = 1.0$, $\lambda_2 = 0.5$, $\beta_{\text{tar
 
 \subsection{Two-Phase Training Protocol}
 
-Training proceeds in two phases with distinct objectives, optimized using Adam \citep{kingma2014adam} with cosine annealing learning rate scheduling.
+Training proceeds in two phases with distinct objectives (Figure~\ref{fig:training}), optimized using Adam \citep{kingma2014adam} with cosine annealing learning rate scheduling.
 
 \paragraph{Phase 1: Representation Learning.} The prediction loss is disabled ($\gamma = 0$). The model learns to reconstruct graph topology, reconstruct gene expression, and structure the latent space through the KL and contrastive losses. Training uses learning rate $\eta = 10^{-3}$ for up to 300 epochs with early stopping (patience of 50 epochs, evaluated every 10 epochs on validation loss $\mathcal{L}_{\text{adj}} + \mathcal{L}_{\text{expr}}$). The best model state is restored after early stopping. Gradient clipping at max norm 1.0 stabilizes training throughout. Model checkpoints are saved every 50 epochs to enable recovery from interruptions; for NSCLC datasets (200,000+ cells), training budgets are extended to 500 and 300 epochs for Phase 1 and Phase 2 respectively.
 
 \paragraph{Phase 2: Joint Clinical Fine-Tuning.} For datasets with patient-level response annotations, the prediction loss is activated ($\gamma = 0.1$) with a reduced learning rate ($\eta = 10^{-4}$) for up to 200 additional epochs. A reconstruction quality safeguard monitors validation losses: if $\mathcal{L}_{\text{adj}}^{\text{val}} > 1.1 \cdot \mathcal{L}_{\text{adj}}^{\text{Phase1}}$ or $\mathcal{L}_{\text{expr}}^{\text{val}} > 1.1 \cdot \mathcal{L}_{\text{expr}}^{\text{Phase1}}$, the prediction weight $\gamma$ is halved. After three such reductions ($\gamma_{\min} = 0.1/2^3 = 0.0125$), Phase 2 terminates early to preserve representation quality. Optionally, the encoder and gate parameters can be frozen during Phase 2 (training only the predictor head), which serves as an ablation condition.
 
 \paragraph{Mini-batch training.} For datasets exceeding 50,000 cells, we automatically employ mini-batch training using PyTorch Geometric's NeighborLoader with 2-hop neighbor sampling ($[15, 10]$ neighbors per hop) and batch size $B = 512$. This enables processing of arbitrarily large graphs with per-iteration complexity $O(B \cdot k^2 \cdot D \cdot H)$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{figuresGVAE/TwoPhasePanels.png}
+\caption{\textbf{Two-phase training protocol with posterior collapse prevention.} \textbf{(A)}~Training timeline showing the cyclical KL annealing schedule $\beta(t)$ with 4 ramp-hold cycles, total training loss, and KL divergence maintained above the free bits minimum (0.5 nats/dim, dashed line). The Phase~1 to Phase~2 transition at epoch 300 activates the prediction loss $\gamma \mathcal{L}_{\text{pred}}$; a monitoring zone ensures reconstruction quality remains within 10\% of Phase~1 levels. \textbf{(B)}~Phase comparison of latent space structure: UMAP visualizations at the end of Phase~1 (representation learning only) and Phase~2 (joint clinical fine-tuning) demonstrate that cluster structure and rare cell recall ($R^{(1)}$ vs.\ $R^{(2)}$) are preserved or improved by clinical supervision.}
+\label{fig:training}
+\end{figure}
 
 \subsection{End-to-End Response Predictor}
 \label{sec:predictor}
