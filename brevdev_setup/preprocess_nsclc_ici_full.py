@@ -95,16 +95,13 @@ def main():
 
     adata.obs['patient_id'] = adata.obs['sampleID']
 
-    resp_map = {'MPR': 'responder', 'pCR': 'responder', 'non-MPR': 'non-responder'}
+    resp_map = {'MPR': 1, 'pCR': 1, 'non-MPR': 0}
     adata.obs['response'] = adata.obs['pathological_response'].map(resp_map)
     n_before = adata.n_obs
     adata = adata[adata.obs['response'].notna()].copy()
     print(f"  Dropped {n_before - adata.n_obs} cells with unknown response")
     print(f"  {adata.n_obs} cells, {adata.obs['patient_id'].nunique()} patients")
     print(f"  Response: {dict(adata.obs['response'].value_counts())}")
-
-    resp_binary = (adata.obs['response'] == 'responder').astype(int)
-    adata.obs['response'] = resp_binary.values
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=200)
