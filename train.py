@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 import sys
 import argparse
 from pathlib import Path
@@ -68,6 +71,43 @@ def make_serializable(obj):
 
 def build_model(config, data, use_predictor):
     return GVAEModel(
+from src.analysis import RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer
+from src.data_utils import prepare_graph_data, create_synthetic_data
+
+def main():
+    config = {
+        'n_cells': 1000,
+        'n_genes': 2000,
+        'n_patients': 10,
+        'hidden_dim': 64,
+        'latent_dim': 32,
+        'n_heads': 4,
+        'dropout': 0.2,
+        'n_neg_samples': 5,
+        'lambda1': 1.0,
+        'lambda2': 0.5,
+        'beta': 0.01,
+        'beta_warmup_epochs': 50,
+        'gamma': 0.1,
+        'lr': 1e-3,
+        'epochs_phase1': 100,
+        'epochs_phase2': 50,
+        'patience': 50,
+        'max_grad_norm': 1.0,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    }
+    
+    print("Creating synthetic data...")
+    adata = create_synthetic_data(config['n_cells'], config['n_genes'], config['n_patients'])
+    print(f"  {adata.n_obs} cells, {adata.n_vars} genes after QC")
+    
+    print("Building graph...")
+    data = prepare_graph_data(adata)
+    print(f"  {data.edge_index.size(1)} edges, "
+          f"{data.pos_pairs.size(0)} positive pairs, "
+          f"{data.neg_pairs.size(0)} negative pairs")
+    
+    model = GVAEModel(
         n_features=data.x.size(1),
         n_genes=data.x_raw.size(1),
         hidden_dim=config['hidden_dim'],

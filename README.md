@@ -18,17 +18,9 @@ Outputs saved to `outputs/`.
 - `src/config.py` - LOCAL and FULL configs, device detection (cuda/mps/cpu)
 - `src/model.py` - GVAEModel with cell-adaptive gate, dual decoder, response predictor
 - `src/trainer.py` - Two-phase training with reconstruction safeguards
-- `src/analysis.py` - Rare cell detection, clustering, prediction metrics
-- `src/data_utils.py` - Graph construction from AnnData, patient-level splits
-- `train.py` - End-to-end pipeline with config CLI
-
-## Architecture
-
-- **Encoder**: Two-layer GAT with cell-adaptive hybrid edge weights (molecular + spatial graphs fused per-cell via learned gate)
-- **Expression decoder**: ZINB likelihood over raw counts
-- **Adjacency decoder**: Dot-product with negative sampling
-- **Response predictor**: Attention pooling over patient cells, binary classifier
-- **Training**: Phase 1 (representation) then Phase 2 (clinical fine-tuning with reconstruction safeguards)
+- `src/analysis.py` - Rare cell detection, clustering, prediction
+- `src/data_utils.py` - Graph construction from AnnData
+- `train.py` - End-to-end pipeline
 
 ## Key Features
 
