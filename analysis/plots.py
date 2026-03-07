@@ -124,32 +124,24 @@ print("Running Spatial Plot:")
 #accessing spatial coordinatesf
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-#Panel A, coloring all cells by cluster w/ 20 distinct colors
+# Panel A, coloring all cells by cluster w/ 20 distinct colors
 scatter = axes[0].scatter(
     coords[:, 0], coords[:, 1],
     c=labels.to_numpy().astype(int), cmap='tab20',
     s=3, alpha=0.6
 )
 
-#labels
 axes[0].set_title('A: Spatial Cluster Distribution',fontweight='bold')
 axes[0].set_xlabel('X coordinate (µm)')
 axes[0].set_ylabel('Y coordinate (µm)')
 axes[0].set_aspect('equal')
 
 # Panel B, highlighting rare cells
-
-# First, highlighting all of the normal cells
-axes[1].scatter(coords[~is_rare, 0], coords[~is_rare, 1], c='#d0d0d0', s=2, alpha=0.4, label=f'Normal cells (n={(~is_rare).sum()})')
-
-# overlaying with the rare cells
-axes[1].scatter(coords[is_rare, 0], coords[is_rare, 1], c='#e63946', s=15, alpha=0.9, label=f'Rare cells (n={is_rare.sum()})', zorder=5)
-
+axes[1].scatter(coords[~is_rare, 0], coords[~is_rare, 1], c='#d0d0d0', s=2, alpha=0.4, label=f'Normal cells (n={(~is_rare).sum()})') # normal
+axes[1].scatter(coords[is_rare, 0], coords[is_rare, 1], c='#e63946', s=15, alpha=0.9, label=f'Rare cells (n={is_rare.sum()})', zorder=5) # rare
 axes[1].set_title('B: Spatially-Restricted Rare Cell Populations', fontweight='bold')
 axes[1].set_xlabel('X coordinate (µm)')
 axes[1].set_ylabel('Y coordinate (µm)')
-
-#prevents squashing and distorting of figure
 axes[1].set_aspect('equal')
 axes[1].legend(loc='upper right', fontsize=9)
 
@@ -258,7 +250,6 @@ print("\nAll figures saved to analysis/")
 print("fig1_umap.png — latent space structure")
 print("fig2_spatial.png — spatial rare cell distribution")
 print("fig3_volcano.png — differential expression of rare cluster")
-#print("fig4_roc.png — immunotherapy response prediction")
 
 benchmark_results = run_all_baselines(adata, scores, labels, eta=2.0)
 print(benchmark_results)
