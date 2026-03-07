@@ -473,7 +473,7 @@ def process_colorectal():
     print(f"  Saved: {out_path} ({adata.n_obs} spots, {adata.n_vars} genes)")
 
 
-def process_nsclc():
+def process_nsclc(max_cells_per_patient = 50):
     print("\n=== Processing NSCLC into h5ad ===")
     raw_dir = RAW_DIR / "nsclc"
 
@@ -495,6 +495,11 @@ def process_nsclc():
     if mtx_dir.exists():
         print("  Reading scRNA-seq (10x MTX)...")
         adata_sc = sc.read_10x_mtx(str(mtx_dir), var_names="gene_symbols", cache=False)
+
+        if max_cells_per_patient and adata_sc.n_obs > max_cells_per_patient:
+            sc.pp.subsample(adata_sc, n_obs=max_cells_per_patient)
+            print(f"  Subsampled to {adata_sc.n_obs} cells")
+
         sc.pp.filter_cells(adata_sc, min_genes=200)
         sc.pp.filter_genes(adata_sc, min_cells=3)
         adata_sc.var["mt"] = adata_sc.var_names.str.startswith("MT-")
