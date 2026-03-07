@@ -47,10 +47,6 @@ plt.tight_layout()
 plt.show()
 
 # Simple Rare Cell KL Score Violin Plot
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-import pandas as pd
 
 np.random.seed(42)
 
