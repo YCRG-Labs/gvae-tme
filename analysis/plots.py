@@ -1,8 +1,3 @@
-"""
-NOTE: The embeddings and cluster labels are from Jacob's model (real data),
-      but patient metadata and spatial coordinates are currently synthetic.
-      Replace the synthetic sections with real data when available.
-"""
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
