@@ -5,8 +5,6 @@ import sys
 import argparse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
-
-import argparse
 import torch
 import numpy as np
 import json
@@ -86,58 +84,6 @@ def build_model(config, data, use_predictor):
         spatial_bias=config.get('spatial_bias', 0.0),
     )
 
-from src.analysis import RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer
-<<<<<<< Updated upstream
-from src.data_utils import prepare_graph_data, create_synthetic_data
-
-def main():
-    config = {
-        'n_cells': 1000,
-        'n_genes': 2000,
-        'n_patients': 10,
-        'hidden_dim': 64,
-        'latent_dim': 32,
-        'n_heads': 4,
-        'dropout': 0.2,
-        'n_neg_samples': 5,
-        'lambda1': 1.0,
-        'lambda2': 0.5,
-        'beta': 0.01,
-        'beta_warmup_epochs': 50,
-        'gamma': 0.1,
-        'lr': 1e-3,
-        'epochs_phase1': 100,
-        'epochs_phase2': 50,
-        'patience': 50,
-        'max_grad_norm': 1.0,
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    }
-    
-    print("Creating synthetic data...")
-    adata = create_synthetic_data(config['n_cells'], config['n_genes'], config['n_patients'])
-    print(f"  {adata.n_obs} cells, {adata.n_vars} genes after QC")
-    
-    print("Building graph...")
-    data = prepare_graph_data(adata)
-    print(f"  {data.edge_index.size(1)} edges, "
-          f"{data.pos_pairs.size(0)} positive pairs, "
-          f"{data.neg_pairs.size(0)} negative pairs")
-    
-    model = GVAEModel(
-        n_features=data.x.size(1),
-        n_genes=data.x_raw.size(1),
-        hidden_dim=config['hidden_dim'],
-        latent_dim=config['latent_dim'],
-        n_heads=config['n_heads'],
-        dropout=config['dropout'],
-        n_neg_samples=config['n_neg_samples'],
-        use_predictor=use_predictor,
-        encoder_type=config.get('encoder_type', 'gat'),
-        decoder_type=config.get('decoder_type', 'zinb'),
-        gate_mode=config.get('gate_mode', 'learned'),
-        spatial_bias=config.get('spatial_bias', 0.0),
-    )
-
 def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=None):
 
     batch_size = config.get('batch_size')
@@ -165,79 +111,6 @@ def assign_patient_splits(data, train_pids, val_pids, test_pids, unique_pids):
     data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in test_pids], dtype=torch.long)
 
 def run_downstream(model, data, config, adata, output_dir, ablation=None):
-=======
-from src.data_utils import prepare_graph_data
-
-
-def load_10x_h5(path: str, n_samples: int = 5000):
-    """Load 10x filtered gene-barcode matrix H5, subsample, and preprocess for pipeline."""
-    adata = sc.read_10x_h5(path, gex_only=True)
-    if adata.n_obs > n_samples:
-        sc.pp.subsample(adata, n_obs=n_samples, random_state=42)
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
-    sc.pp.normalize_total(adata, target_sum=10000)
-    sc.pp.log1p(adata)
-    n_genes = adata.n_vars
-    sc.pp.highly_variable_genes(adata, n_top_genes=min(1000, n_genes))
-    adata = adata[:, adata.var['highly_variable']].copy()
-    sc.pp.pca(adata, n_comps=min(50, adata.n_vars - 1, adata.n_obs - 1))
-    # Use first 2 PCs as spatial proxy when no spatial coords
-    adata.obsm['spatial'] = adata.obsm['X_pca'][:, :2].copy()
-    return adata
-
-
-def create_synthetic_data(n_cells=5000, n_genes=2000, n_patients=10):
-    np.random.seed(42)
-    torch.manual_seed(42)
-    counts = np.random.poisson(2, size=(n_cells, n_genes))
-    patient_ids = np.random.choice(n_patients, n_cells)
-    patient_response = np.random.choice([0, 1], n_patients)
-    cell_response = patient_response[patient_ids]
-    coords = np.random.randn(n_cells, 2) * 100
-    adata = anndata.AnnData(X=counts)
-    adata.obs['patient_id'] = [f'P{i:03d}' for i in patient_ids]
-    adata.obs['response'] = cell_response
-    adata.obsm['spatial'] = coords
-    sc.pp.filter_cells(adata, min_genes=200)
-    sc.pp.filter_genes(adata, min_cells=3)
-    sc.pp.normalize_total(adata, target_sum=10000)
-    sc.pp.log1p(adata)
-    sc.pp.highly_variable_genes(adata, n_top_genes=min(1000, n_genes))
-    sc.pp.pca(adata, n_comps=50)
-    return adata
-
-
-def main():
-    p = argparse.ArgumentParser(description='Train GVAE-TME')
-    p.add_argument('--data', type=str, default=None, help='Path to 10x H5 (filtered_gene_bc_matrices_h5.h5) or omit for synthetic')
-    p.add_argument('--n_samples', type=int, default=5000, help='Max cells to use (default 5000)')
-    args = p.parse_args()
-
-    config = {'n_cells': 5000, 'n_genes': 2000, 'n_patients': 10,
-              'hidden_dim': 64, 'latent_dim': 32, 'n_heads': 4, 'dropout': 0.2,
-              'lambda1': 1.0, 'lambda2': 0.5, 'beta': 0.01, 'gamma': 0.1,
-              'lr': 1e-3, 'epochs_phase1': 100, 'epochs_phase2': 50,
-              'patience': 20, 'device': 'cuda' if torch.cuda.is_available() else 'cpu'}
-
-    if args.data:
-        print(f'Loading 10x H5: {args.data} (up to {args.n_samples} cells)')
-        adata = load_10x_h5(args.data, n_samples=args.n_samples)
-        use_predictor = False  # no patient/response in 10x
-        print(f'Preprocessed: {adata.n_obs} cells, {adata.n_vars} genes (HVG), {adata.obsm["X_pca"].shape[1]} PCs')
-    else:
-        adata = create_synthetic_data(config['n_cells'], config['n_genes'], config['n_patients'])
-        use_predictor = True
-    data = prepare_graph_data(adata)
-
-    model = GVAEModel(n_features=data.x.size(1), n_genes=data.x_raw.size(1),
-                      hidden_dim=config['hidden_dim'], latent_dim=config['latent_dim'],
-                      n_heads=config['n_heads'], dropout=config['dropout'], use_predictor=use_predictor)
-    
-    trainer = Trainer(model, config, device=config['device'])
-    final_metrics = trainer.train(data)
-    
->>>>>>> Stashed changes
     model.eval()
     data_eval = data.to(config['device'])
     with torch.no_grad():
