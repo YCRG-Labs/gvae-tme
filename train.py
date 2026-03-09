@@ -559,6 +559,11 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
 
         torch.save(model.state_dict(), fold_dir / 'model.pt')
 
+        # Run downstream on the last fold to produce analysis adata
+        if fold == n_outer - 1:
+            print(f"\n=== Running downstream analysis (fold {fold + 1}) ===")
+            run_downstream(model, data, fold_config, adata, output_dir, ablation=ablation)
+
     print(f"\n{'='*50}")
     print("Cross-Validation Results")
     print(f"{'='*50}")
