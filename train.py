@@ -299,6 +299,16 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     np.save(output_dir / 'gate_values.npy', gate_vals)
     np.save(output_dir / 'confidence.npy', confidence)
 
+    # Save analysis-ready adata for plots.py
+    adata.obsm['X_gvae'] = z
+    adata.obs['cluster'] = labels
+    adata.obs['rare_score'] = scores
+    adata.obs['confidence'] = confidence
+    adata.obs['gate'] = gate_vals
+    adata_path = output_dir / 'adata_analysis.h5ad'
+    adata.write(adata_path)
+    print(f"Saved analysis adata: {adata_path}")
+
     if clinical_results:
         with open(output_dir / 'clinical_association.json', 'w') as f:
             json.dump(make_serializable(clinical_results), f, indent=2)
