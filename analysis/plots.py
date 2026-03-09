@@ -220,7 +220,59 @@ plt.savefig(OUT_DIR / 'fig2_spatial.png', dpi=300, bbox_inches='tight')
 plt.close()
 print("Saved fig2_spatial.png")
 
-#3. Volcano Plot (real DE when gene matrix available) --------------------------
+#3. KL Violin Plot (rare vs common) -------------------------------------------
+print("Running KL violin plot:")
+
+import seaborn as sns
+
+_violin_df = pd.DataFrame({
+    'KL Divergence Score': scores.values if hasattr(scores, 'values') else scores,
+    'Group': np.where(is_rare, 'Rare cells', 'Common cells')
+})
+
+plt.rcParams.update({
+    'font.family': 'serif',
+    'mathtext.fontset': 'cm',
+    'axes.linewidth': 0.7,
+})
+
+fig, ax = plt.subplots(figsize=(5, 5))
+palette = {'Common cells': '#2C5F9E', 'Rare cells': '#7BC47F'}
+sns.violinplot(
+    x='Group', y='KL Divergence Score', data=_violin_df,
+    palette=palette, inner='quartile', linewidth=0.8,
+    order=['Common cells', 'Rare cells'], ax=ax
+)
+
+# Stats annotation
+from scipy.stats import mannwhitneyu as _mwu
+_common_vals = _violin_df.loc[_violin_df['Group'] == 'Common cells', 'KL Divergence Score']
+_rare_vals = _violin_df.loc[_violin_df['Group'] == 'Rare cells', 'KL Divergence Score']
+_stat, _pval = _mwu(_common_vals, _rare_vals, alternative='two-sided')
+_p_str = f'p = {_pval:.2e}' if _pval < 0.01 else f'p = {_pval:.3f}'
+
+_ymax = _violin_df['KL Divergence Score'].max()
+_bar_y = _ymax * 1.05
+ax.plot([0, 0, 1, 1], [_bar_y, _bar_y * 1.02, _bar_y * 1.02, _bar_y], lw=0.8, c='k')
+ax.text(0.5, _bar_y * 1.03, _p_str, ha='center', va='bottom', fontsize=9)
+
+ax.set_title('KL Divergence: Rare vs Common Cells', fontsize=12)
+ax.set_xlabel('Group', fontsize=11)
+ax.set_ylabel('KL Divergence Score', fontsize=11)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+n_common = (~is_rare).sum()
+n_rare = is_rare.sum()
+ax.text(0.02, 0.98, f'n = {n_common} common, {n_rare} rare',
+        transform=ax.transAxes, ha='left', va='top', fontsize=8, color='grey')
+
+plt.tight_layout()
+plt.savefig(OUT_DIR / 'fig_kl_violin.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("Saved fig_kl_violin.png")
+
+#4. Volcano Plot (real DE when gene matrix available) --------------------------
 
 FC_THRESH = 1.5
 FDR_THRESH = 0.05
