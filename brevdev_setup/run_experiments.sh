@@ -15,6 +15,10 @@ echo "=========================================="
 if [ -f "data/processed/melanoma.h5ad" ]; then
     python3 train.py --config full --data melanoma --cv --n-folds 5 --inner-hp --n-permutations 1000 \
         2>&1 | tee outputs/melanoma_cv.log
+    if [ -f "outputs/melanoma/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Melanoma ==="
+        cd analysis && python3 plots.py --data ../outputs/melanoma/adata_analysis.h5ad 2>&1 | tee ../outputs/melanoma_plots.log && cd ..
+    fi
 fi
 
 echo ""
@@ -24,6 +28,10 @@ echo "=========================================="
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     python3 train.py --config full --data nsclc_ici --cv --n-folds 5 --batch-size 512 --n-permutations 1000 \
         2>&1 | tee outputs/nsclc_ici_cv.log
+    if [ -f "outputs/nsclc_ici/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: NSCLC ICI ==="
+        cd analysis && python3 plots.py --data ../outputs/nsclc_ici/adata_analysis.h5ad 2>&1 | tee ../outputs/nsclc_ici_plots.log && cd ..
+    fi
 fi
 
 echo ""

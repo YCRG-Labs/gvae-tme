@@ -12,36 +12,42 @@ if [ -f "data/processed/melanoma.h5ad" ]; then
     echo ""
     echo "=== Training: Melanoma (full config) ==="
     python3 train.py --config full --data melanoma 2>&1 | tee outputs/melanoma_train.log
+    if [ -f "outputs/melanoma/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Melanoma ==="
+        cd analysis && python3 plots.py --data ../outputs/melanoma/adata_analysis.h5ad 2>&1 | tee ../outputs/melanoma_plots.log && cd ..
+    fi
 fi
 
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo ""
     echo "=== Training: NSCLC ICI (full config, mini-batch) ==="
     python3 train.py --config full --data nsclc_ici --batch-size 512 2>&1 | tee outputs/nsclc_ici_train.log
+    if [ -f "outputs/nsclc_ici/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: NSCLC ICI ==="
+        cd analysis && python3 plots.py --data ../outputs/nsclc_ici/adata_analysis.h5ad 2>&1 | tee ../outputs/nsclc_ici_plots.log && cd ..
+    fi
 fi
 
-if [ -f "data/processed/nsclc_scrna.h5ad" ]; then
-    echo ""
-    echo "=== Training: NSCLC scRNA (full config) ==="
-    python3 train.py --config full --data nsclc_scrna 2>&1 | tee outputs/nsclc_scrna_train.log
-fi
-
-if [ -f "data/processed/nsclc_visium.h5ad" ]; then
-    echo ""
-    echo "=== Training: NSCLC Visium (full config) ==="
-    python3 train.py --config full --data nsclc_visium 2>&1 | tee outputs/nsclc_visium_train.log
-fi
-
-if [ -f "data/processed/breast.h5ad" ]; then
-    echo ""
-    echo "=== Training: Breast (full config) ==="
-    python3 train.py --config full --data breast 2>&1 | tee outputs/breast_train.log
-fi
+for DATASET in nsclc_scrna nsclc_visium breast; do
+    if [ -f "data/processed/${DATASET}.h5ad" ]; then
+        echo ""
+        echo "=== Training: ${DATASET} (full config) ==="
+        python3 train.py --config full --data "$DATASET" 2>&1 | tee "outputs/${DATASET}_train.log"
+        if [ -f "outputs/${DATASET}/adata_analysis.h5ad" ]; then
+            echo "=== Generating plots: ${DATASET} ==="
+            cd analysis && python3 plots.py --data "../outputs/${DATASET}/adata_analysis.h5ad" 2>&1 | tee "../outputs/${DATASET}_plots.log" && cd ..
+        fi
+    fi
+done
 
 if [ -f "data/processed/colorectal.h5ad" ]; then
     echo ""
     echo "=== Training: Colorectal (full config, mini-batch) ==="
     python3 train.py --config full --data colorectal --batch-size 512 2>&1 | tee outputs/colorectal_train.log
+    if [ -f "outputs/colorectal/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Colorectal ==="
+        cd analysis && python3 plots.py --data ../outputs/colorectal/adata_analysis.h5ad 2>&1 | tee ../outputs/colorectal_plots.log && cd ..
+    fi
 fi
 
 echo ""
