@@ -79,20 +79,28 @@ def scsyno_baseline(adata, kl_scores, eta=2.0):
     print("scSynO Markers not found — requires real data")
     return None
 
-def cisc_baseline(adata, kl_scores, labels, eta=2.0):
+def cisc_baseline(adata, kl_scores, eta=2.0):
     """
-    Clustering-Independent Single-Cell analysis (AKA. CISC-style) baseline:
-    identifies rare cells as those forming small, isolated clusters in expression space.
-    Works on both synthetic and real data since it only uses cluster labels and expression, not specific genes.
+    Clustering-Independent Single-Cell analysis (CISC-style) baseline:
+    identifies rare cells as those in small clusters in *expression* space (PCA + Leiden),
+    independent of GVAE latent space. Small clusters (<5% of cells) are deemed rare.
     """
     import scanpy as sc
-    import anndata
 
-    # core logic of CSIC: rare cells are in small clusters that are transcriptionally distant from large clusters
+    # Cluster in expression space only (no GVAE latent)
+    ad = adata.copy()
+    if 'X_pca' not in ad.obsm or ad.obsm['X_pca'].shape[1] < 2:
+        n_comps = min(50, ad.n_obs - 1, ad.n_vars - 1)
+        if n_comps < 2:
+            print("CISC: insufficient cells/genes for PCA — skipping.")
+            return None
+        sc.pp.pca(ad, n_comps=n_comps)
+    sc.pp.neighbors(ad, use_rep='X_pca', n_neighbors=15)
+    sc.tl.leiden(ad, resolution=1.0)
+    labels = ad.obs['leiden'].astype(int).values
+
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
-
-    # clusters with less than 5% of cells are deemed as "rare clusters"
     rare_cluster_ids = unique[counts / total < 0.05]
     cisc_labels = np.isin(labels, rare_cluster_ids)
 
@@ -117,7 +125,11 @@ def cisc_baseline(adata, kl_scores, labels, eta=2.0):
     print(f"Precision: {metrics['precision']:.3f} | Recall: {metrics['recall']:.3f} | F1: {metrics['f1']:.3f}")
     return metrics
 
-def run_all_baselines(adata, kl_scores, labels, eta=2.0):
+def run_all_baselines(adata, kl_scores, labels=None, eta=2.0):
+    """
+    labels: optional GVAE cluster labels (used only for display/consistency).
+    CISC clusters independently on expression (PCA+Leiden), not on GVAE latent.
+    """
     print("\n════════ Rare Cell Detection Benchmark ════════\n")
     print(f"KL threshold calculations: mean + {eta}*std")
 
@@ -127,8 +139,8 @@ def run_all_baselines(adata, kl_scores, labels, eta=2.0):
     marker_labels, used_markers = marker_based_annotation(adata)
     results['marker'] = evaluate_kl_vs_baseline(kl_scores, marker_labels, eta)
 
-    # 2. CISC-based
-    results['cisc'] = cisc_baseline(adata, kl_scores, labels, eta)
+    # 2. CISC: cluster in expression space (PCA+Leiden), not GVAE latent
+    results['cisc'] = cisc_baseline(adata, kl_scores, eta=eta)
 
     # 3. scSynO-based - will come
     return results
