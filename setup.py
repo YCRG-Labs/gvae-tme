@@ -4,8 +4,7 @@ setup(
     name='gvae-tme',
     version='0.1.0',
     description='Graph VAE for Tumor Microenvironment Analysis',
-    packages=find_packages(where='src'),
-    package_dir={'': 'src'},
+    packages=find_packages(),
     install_requires=[
         'torch>=2.0',
         'torch-geometric>=2.3',

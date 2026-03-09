@@ -232,11 +232,11 @@ def _run_real_volcano(adata, is_rare, out_path):
     if adata.obs['_rare_group'].value_counts().min() < 10:
         return False
     try:
-        sc.tl.rank_genes_groups(ad, groupby='_rare_group', groups=['rare'], reference='non_rare', method='wilcoxon', use_raw=False, n_genes=ad.n_vars)
+        sc.tl.rank_genes_groups(adata, groupby='_rare_group', groups=['rare'], reference='non_rare', method='wilcoxon', use_raw=False, n_genes=adata.n_vars)
     except Exception:
         return False
     try:
-        res = sc.get.rank_genes_groups_df(ad, group='rare')
+        res = sc.get.rank_genes_groups_df(adata, group='rare')
     except Exception:
         return False
     if res is None or res.empty:
