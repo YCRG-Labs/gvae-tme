@@ -119,11 +119,16 @@ def main():
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
 
-    print("  Regressing out confounders (this takes a while on 1M+ cells)...")
-    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
-
     print("  Selecting 2000 HVGs (seurat_v3)...")
     sc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', layer='counts')
+
+    print(f"  Subsetting to HVGs before regress_out (avoids 268GB dense matrix)...")
+    adata = adata[:, adata.var['highly_variable']].copy()
+    gc.collect()
+    print(f"  After HVG subset: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    print("  Regressing out confounders...")
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
 
     print("  Running PCA...")
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
