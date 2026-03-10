@@ -1,6 +1,5 @@
 #!/bin/bash
-set -e
-
+# Don't use set -e — we want to continue if one dataset fails
 echo "=== GVAE-TME: Download Datasets ==="
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -8,9 +7,16 @@ cd "$REPO_ROOT"
 
 mkdir -p data/raw data/processed
 
+FAILED=""
+
 echo ""
 echo "=== Melanoma (GSE120575) ~1GB ==="
-python3 data/download_datasets.py melanoma
+if python3 data/download_datasets.py melanoma; then
+    echo "  [OK] Melanoma download complete"
+else
+    echo "  [FAILED] Melanoma download"
+    FAILED="$FAILED melanoma"
+fi
 
 echo ""
 echo "=== NSCLC ICI (GSE243013) ~7GB ==="
@@ -19,6 +25,7 @@ mkdir -p "$NSCLC_DIR"
 
 GEO_BASE="https://ftp.ncbi.nlm.nih.gov/geo/series/GSE243nnn/GSE243013/suppl"
 
+NSCLC_OK=true
 for FILE in \
     "GSE243013_NSCLC_immune_scRNA_counts.mtx.gz" \
     "GSE243013_NSCLC_immune_scRNA_metadata.csv.gz" \
@@ -30,36 +37,31 @@ for FILE in \
         echo "  [skip] $FILE already exists"
     else
         echo "  Downloading $FILE..."
-        wget -c -t 0 --retry-connrefused --waitretry=10 --timeout=60 \
-            -O "$OUTPATH" "$GEO_BASE/$FILE"
+        if ! wget -c -t 3 --retry-connrefused --waitretry=10 --timeout=120 \
+            -O "$OUTPATH" "$GEO_BASE/$FILE"; then
+            echo "  [FAILED] $FILE"
+            NSCLC_OK=false
+        fi
     fi
 done
 
-echo "  Decompressing metadata, barcodes, genes..."
-for GZ in "$NSCLC_DIR"/GSE243013_NSCLC_immune_scRNA_metadata.csv.gz \
-           "$NSCLC_DIR"/GSE243013_barcodes.csv.gz \
-           "$NSCLC_DIR"/GSE243013_genes.csv.gz; do
-    OUT="${GZ%.gz}"
-    if [ -f "$OUT" ]; then
-        echo "    [skip] $(basename "$OUT") already decompressed"
-    else
-        gunzip -k "$GZ"
-    fi
-done
-
-echo ""
-echo "=== NSCLC Demo (10x Genomics) ==="
-echo "  Manual download required (JS-rendered pages):"
-echo "  scRNA: https://www.10xgenomics.com/datasets/nsclc-tumor-1-standard-5-0-0"
-echo "  Visium HD: https://www.10xgenomics.com/datasets/visium-hd-cytassist-gene-expression-human-lung-cancer-fixed-frozen"
-
-# echo ""
-# echo "=== Breast Cancer (GSE243280) ~32GB ==="
-# python3 data/download_datasets.py breast
-
-# echo ""
-# echo "=== Colorectal (GSE280318) ~113GB ==="
-# python3 data/download_datasets.py colorectal
+if $NSCLC_OK; then
+    echo "  Decompressing metadata, barcodes, genes..."
+    for GZ in "$NSCLC_DIR"/GSE243013_NSCLC_immune_scRNA_metadata.csv.gz \
+               "$NSCLC_DIR"/GSE243013_barcodes.csv.gz \
+               "$NSCLC_DIR"/GSE243013_genes.csv.gz; do
+        OUT="${GZ%.gz}"
+        if [ -f "$OUT" ]; then
+            echo "    [skip] $(basename "$OUT") already decompressed"
+        else
+            gunzip -k "$GZ"
+        fi
+    done
+    echo "  [OK] NSCLC ICI download complete"
+else
+    echo "  [FAILED] NSCLC ICI download — some files missing"
+    FAILED="$FAILED nsclc_ici"
+fi
 
 echo ""
 echo "=== Download Summary ==="
@@ -70,3 +72,9 @@ for D in data/raw/*/; do
         echo "  $(basename "$D"): $COUNT files, $SIZE"
     fi
 done
+
+if [ -n "$FAILED" ]; then
+    echo ""
+    echo "WARNING: Failed downloads:$FAILED"
+    echo "Check network / disk space and re-run."
+fi

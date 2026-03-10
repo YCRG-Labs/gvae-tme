@@ -1,6 +1,5 @@
 #!/bin/bash
-set -e
-
+# Don't use set -e — continue training other datasets if one fails
 echo "=== GVAE-TME: Train on All Datasets ==="
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

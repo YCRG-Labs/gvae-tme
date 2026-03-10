@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+# Don't use set -e — continue experiments if one fails
 
 echo "=== GVAE-TME: Full Paper Experiments ==="
 
