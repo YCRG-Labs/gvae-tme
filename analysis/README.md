@@ -2,9 +2,6 @@
 
 This folder stores post-training outputs from `analyze.py`.
 
-## IMPORTANT NOTE:
-Right now, the spatial coordinates used are just **fake/placeholder data**. Once real tissue coordinates are added, this figure will actually show real spatial patterns within the tissue. Currently just a template showing what the figure *will* look like.
-
 ## Data Source
 
 `analyze.py` reads directly from `../data/`, files produced by `train.py`.
