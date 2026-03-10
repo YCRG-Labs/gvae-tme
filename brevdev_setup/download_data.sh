@@ -64,6 +64,24 @@ else
 fi
 
 echo ""
+echo "=== Breast Cancer (GSE243280) ~32GB ==="
+if python3 data/download_datasets.py breast; then
+    echo "  [OK] Breast download complete"
+else
+    echo "  [FAILED] Breast download"
+    FAILED="$FAILED breast"
+fi
+
+echo ""
+echo "=== Colorectal (GSE280318) ~113GB ==="
+if python3 data/download_datasets.py colorectal; then
+    echo "  [OK] Colorectal download complete"
+else
+    echo "  [FAILED] Colorectal download"
+    FAILED="$FAILED colorectal"
+fi
+
+echo ""
 echo "=== Download Summary ==="
 for D in data/raw/*/; do
     if [ -d "$D" ]; then

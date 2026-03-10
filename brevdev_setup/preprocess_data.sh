@@ -50,6 +50,32 @@ else
 fi
 
 echo ""
+echo "=== Processing Breast Cancer ==="
+if [ -d "data/raw/breast" ]; then
+    if python3 data/download_datasets.py process-breast 2>&1 | tee data/processed/breast_preprocess.log; then
+        echo "  [OK] Breast preprocessed"
+    else
+        echo "  [FAILED] Breast preprocessing — check data/processed/breast_preprocess.log"
+        FAILED="$FAILED breast"
+    fi
+else
+    echo "  [skip] Raw data not found (run download_data.sh first)"
+fi
+
+echo ""
+echo "=== Processing Colorectal ==="
+if [ -d "data/raw/colorectal" ]; then
+    if python3 data/download_datasets.py process-colorectal 2>&1 | tee data/processed/colorectal_preprocess.log; then
+        echo "  [OK] Colorectal preprocessed"
+    else
+        echo "  [FAILED] Colorectal preprocessing — check data/processed/colorectal_preprocess.log"
+        FAILED="$FAILED colorectal"
+    fi
+else
+    echo "  [skip] Raw data not found (run download_data.sh first)"
+fi
+
+echo ""
 echo "=== Processed Dataset Summary ==="
 for F in data/processed/*.h5ad; do
     if [ -f "$F" ]; then
