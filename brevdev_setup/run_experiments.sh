@@ -26,7 +26,7 @@ echo "=========================================="
 echo "  2. Cross-Validation: NSCLC ICI"
 echo "=========================================="
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
-    python3 train.py --config full --data nsclc_ici --cv --n-folds 5 --batch-size 512 --n-permutations 1000 \
+    python3 train.py --config full --data nsclc_ici --cv --n-folds 5 --batch-size 512 --max-cells 200000 --n-permutations 1000 \
         2>&1 | tee outputs/nsclc_ici_cv.log
     if [ -f "outputs/nsclc_ici/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: NSCLC ICI ==="
@@ -88,7 +88,7 @@ fi
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo ""
     echo "--- Tuning: NSCLC ICI (50 trials) ---"
-    python3 tune.py --data nsclc_ici --config full --n-trials 50 \
+    python3 tune.py --data nsclc_ici --config full --max-cells 200000 --n-trials 50 \
         2>&1 | tee outputs/nsclc_ici_tune.log
 fi
 
@@ -112,7 +112,7 @@ fi
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo ""
     echo "--- Benchmark CV: NSCLC ICI (GVAE vs scVI vs Scanpy) ---"
-    python3 benchmark.py --config full --data nsclc_ici --methods gvae,scvi,scanpy --batch-size 512 --cv \
+    python3 benchmark.py --config full --data nsclc_ici --methods gvae,scvi,scanpy --batch-size 512 --max-cells 200000 --cv \
         2>&1 | tee outputs/nsclc_ici_benchmark.log
 fi
 

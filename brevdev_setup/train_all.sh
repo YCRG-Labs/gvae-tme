@@ -20,7 +20,7 @@ fi
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo ""
     echo "=== Training: NSCLC ICI (full config, mini-batch) ==="
-    python3 train.py --config full --data nsclc_ici --batch-size 512 2>&1 | tee outputs/nsclc_ici_train.log
+    python3 train.py --config full --data nsclc_ici --batch-size 512 --max-cells 200000 2>&1 | tee outputs/nsclc_ici_train.log
     if [ -f "outputs/nsclc_ici/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: NSCLC ICI ==="
         cd analysis && python3 plots.py --data ../outputs/nsclc_ici/adata_analysis.h5ad 2>&1 | tee ../outputs/nsclc_ici_plots.log && cd ..
