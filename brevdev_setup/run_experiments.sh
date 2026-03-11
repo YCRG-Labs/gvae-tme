@@ -36,6 +36,19 @@ fi
 
 echo ""
 echo "=========================================="
+echo "  2b. Cross-Validation: Breast"
+echo "=========================================="
+if [ -f "data/processed/breast.h5ad" ]; then
+    python3 train.py --config full --data breast --cv --n-folds 5 --batch-size 512 --n-permutations 1000 \
+        2>&1 | tee outputs/breast_cv.log
+    if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Breast ==="
+        cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log && cd ..
+    fi
+fi
+
+echo ""
+echo "=========================================="
 echo "  3. Ablation Studies (Melanoma)"
 echo "=========================================="
 if [ -f "data/processed/melanoma.h5ad" ]; then
@@ -87,6 +100,13 @@ if [ -f "data/processed/melanoma.h5ad" ]; then
     echo "--- Benchmark CV: Melanoma (GVAE vs scVI vs Scanpy) ---"
     python3 benchmark.py --config full --data melanoma --methods gvae,scvi,scanpy --cv \
         2>&1 | tee outputs/melanoma_benchmark.log
+fi
+
+if [ -f "data/processed/breast.h5ad" ]; then
+    echo ""
+    echo "--- Benchmark CV: Breast (GVAE vs scVI vs Scanpy) ---"
+    python3 benchmark.py --config full --data breast --methods gvae,scvi,scanpy --batch-size 512 --cv \
+        2>&1 | tee outputs/breast_benchmark.log
 fi
 
 if [ -f "data/processed/nsclc_ici.h5ad" ]; then
