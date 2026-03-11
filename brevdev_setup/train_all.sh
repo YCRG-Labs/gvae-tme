@@ -27,11 +27,21 @@ if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     fi
 fi
 
-for DATASET in nsclc_scrna nsclc_visium breast; do
+if [ -f "data/processed/breast.h5ad" ]; then
+    echo ""
+    echo "=== Training: Breast (full config, mini-batch) ==="
+    python3 train.py --config full --data breast --batch-size 512 2>&1 | tee outputs/breast_train.log
+    if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Breast ==="
+        cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log && cd ..
+    fi
+fi
+
+for DATASET in nsclc_scrna nsclc_visium; do
     if [ -f "data/processed/${DATASET}.h5ad" ]; then
         echo ""
         echo "=== Training: ${DATASET} (full config) ==="
-        python3 train.py --config full --data "$DATASET" 2>&1 | tee "outputs/${DATASET}_train.log"
+        python3 train.py --config full --data "$DATASET" --batch-size 512 2>&1 | tee "outputs/${DATASET}_train.log"
         if [ -f "outputs/${DATASET}/adata_analysis.h5ad" ]; then
             echo "=== Generating plots: ${DATASET} ==="
             cd analysis && python3 plots.py --data "../outputs/${DATASET}/adata_analysis.h5ad" 2>&1 | tee "../outputs/${DATASET}_plots.log" && cd ..
@@ -42,7 +52,7 @@ done
 if [ -f "data/processed/colorectal.h5ad" ]; then
     echo ""
     echo "=== Training: Colorectal (full config, mini-batch) ==="
-    python3 train.py --config full --data colorectal --batch-size 512 2>&1 | tee outputs/colorectal_train.log
+    python3 train.py --config full --data colorectal --batch-size 512 --max-cells 200000 2>&1 | tee outputs/colorectal_train.log
     if [ -f "outputs/colorectal/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Colorectal ==="
         cd analysis && python3 plots.py --data ../outputs/colorectal/adata_analysis.h5ad 2>&1 | tee ../outputs/colorectal_plots.log && cd ..

@@ -39,7 +39,7 @@ echo "=========================================="
 echo "  2b. Cross-Validation: Breast"
 echo "=========================================="
 if [ -f "data/processed/breast.h5ad" ]; then
-    python3 train.py --config full --data breast --cv --n-folds 5 --batch-size 512 --n-permutations 1000 \
+    python3 train.py --config full --data breast --cv --n-folds 5 --batch-size 512 --max-cells 50000 --n-permutations 1000 \
         2>&1 | tee outputs/breast_cv.log
     if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Breast ==="
@@ -105,7 +105,7 @@ fi
 if [ -f "data/processed/breast.h5ad" ]; then
     echo ""
     echo "--- Benchmark CV: Breast (GVAE vs scVI vs Scanpy) ---"
-    python3 benchmark.py --config full --data breast --methods gvae,scvi,scanpy --batch-size 512 --cv \
+    python3 benchmark.py --config full --data breast --methods gvae,scvi,scanpy --batch-size 512 --max-cells 50000 --cv \
         2>&1 | tee outputs/breast_benchmark.log
 fi
 
@@ -122,7 +122,7 @@ echo "  6. Cross-Dataset Transfer"
 echo "=========================================="
 if [ -f "data/processed/melanoma.h5ad" ] && [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo "--- Transfer: Melanoma -> NSCLC ICI ---"
-    python3 benchmark.py --config full --transfer-source melanoma --transfer-target nsclc_ici \
+    python3 benchmark.py --config full --transfer-source melanoma --transfer-target nsclc_ici --max-cells 200000 \
         2>&1 | tee outputs/melanoma_to_nsclc_transfer.log
 fi
 
