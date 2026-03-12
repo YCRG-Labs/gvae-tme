@@ -95,10 +95,12 @@ def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=N
             return MiniBatchTrainer(model, config, device=device,
                                     checkpoint_dir=output_dir,
                                     freeze_encoder=freeze_encoder)
-        except (ImportError, Exception) as e:
-            print(f"  [warn] Mini-batch unavailable: {e}")
-            print(f"  Install pyg-lib or torch-sparse for NeighborLoader support.")
-            print(f"  Falling back to full-batch training.")
+        except Exception as e:
+            print(f"  [WARN] Mini-batch training failed: {e}")
+            print(f"  Install torch-sparse: pip install torch-sparse torch-scatter")
+            print(f"  Or re-run brevdev_setup/install.sh")
+            print(f"  Falling back to FULL-BATCH training (entire graph on GPU).")
+            print(f"  This WILL OOM on large datasets (>50K cells).")
             config['batch_size'] = None
     return Trainer(model, config, device=device,
                    checkpoint_dir=output_dir,
