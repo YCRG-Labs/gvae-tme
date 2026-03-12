@@ -30,7 +30,7 @@ fi
 if [ -f "data/processed/breast.h5ad" ]; then
     echo ""
     echo "=== Training: Breast (full config, mini-batch) ==="
-    python3 train.py --config full --data breast --batch-size 512 2>&1 | tee outputs/breast_train.log
+    python3 train.py --config full --data breast --batch-size 512 --max-cells 50000 2>&1 | tee outputs/breast_train.log
     if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Breast ==="
         cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log && cd ..

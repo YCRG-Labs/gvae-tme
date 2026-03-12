@@ -112,15 +112,60 @@ def assign_patient_splits(data, train_pids, val_pids, test_pids, unique_pids):
     data.val_patient_idx = torch.tensor([pid_to_idx[p] for p in val_pids], dtype=torch.long)
     data.test_patient_idx = torch.tensor([pid_to_idx[p] for p in test_pids], dtype=torch.long)
 
+def _chunked_inference(model, data, device, chunk_size=4096):
+    """Run model inference in chunks to avoid GPU OOM on large graphs."""
+    n = data.num_nodes
+    if n <= chunk_size:
+        data_dev = data.to(device)
+        outputs = model(data_dev)
+        return {k: v.cpu() if torch.is_tensor(v) else v for k, v in outputs.items()}
+
+    # For large graphs, use NeighborLoader if available, else full-batch on CPU
+    try:
+        from torch_geometric.loader import NeighborLoader
+        loader = NeighborLoader(data, num_neighbors=[15, 10], batch_size=chunk_size, shuffle=False)
+        z_parts, mu_parts, logvar_parts, gate_parts = [], [], [], []
+        idx_parts = []
+        for batch in loader:
+            batch = batch.to(device)
+            with torch.no_grad():
+                out = model(batch)
+            ns = batch.batch_size
+            z_parts.append(out['z'][:ns].cpu())
+            mu_parts.append(out['mu'][:ns].cpu())
+            logvar_parts.append(out['logvar'][:ns].cpu())
+            gate_parts.append(out['gate_values'][:ns].cpu())
+            idx_parts.append(batch.n_id[:ns].cpu())
+        # Reassemble in original order
+        z_all = torch.zeros(n, z_parts[0].shape[1])
+        mu_all = torch.zeros_like(z_all)
+        logvar_all = torch.zeros_like(z_all)
+        gate_all = torch.zeros(n)
+        idx_all = torch.cat(idx_parts)
+        z_all[idx_all] = torch.cat(z_parts)
+        mu_all[idx_all] = torch.cat(mu_parts)
+        logvar_all[idx_all] = torch.cat(logvar_parts)
+        gate_all[idx_all] = torch.cat(gate_parts)
+        return {'z': z_all, 'mu': mu_all, 'logvar': logvar_all, 'gate_values': gate_all}
+    except Exception:
+        # Fallback: full graph on CPU (slow but won't OOM)
+        print("  [warn] NeighborLoader unavailable, running full inference on CPU")
+        data_cpu = data.to('cpu')
+        model_cpu = model.cpu()
+        with torch.no_grad():
+            outputs = model_cpu(data_cpu)
+        model.to(device)
+        return {k: v.cpu() if torch.is_tensor(v) else v for k, v in outputs.items()}
+
 def run_downstream(model, data, config, adata, output_dir, ablation=None):
     model.eval()
-    data_eval = data.to(config['device'])
+    device = config['device']
     with torch.no_grad():
-        outputs = model(data_eval)
-        z = outputs['z'].cpu().numpy()
-        mu = outputs['mu'].cpu().numpy()
-        logvar = outputs['logvar'].cpu().numpy()
-        gate_vals = outputs['gate_values'].cpu().numpy()
+        outputs = _chunked_inference(model, data, device)
+        z = outputs['z'].numpy()
+        mu = outputs['mu'].numpy()
+        logvar = outputs['logvar'].numpy()
+        gate_vals = outputs['gate_values'].numpy()
 
     rare_method = config.get('_rare_method', 'kl')
     detector = RareCellDetector(threshold=config.get('rare_threshold', 2.0))
@@ -148,7 +193,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     print(f"ARI stability: {ari_result.get('mean_ari', 0):.3f} +/- {ari_result.get('std_ari', 0):.3f}")
 
     spatial_metrics = {}
-    coords = data_eval.coords.cpu().numpy()
+    coords = data.coords.cpu().numpy() if torch.is_tensor(data.coords) else data.coords
     if coords.std() > 1.0:
         spatial_metrics = BiologicalValidation.morans_i(gate_vals, coords)
         print(f"Moran's I (gate): {spatial_metrics.get('morans_i', 0):.3f}, "
@@ -211,29 +256,29 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
               f"Batch entropy: {entropy_result['batch_entropy']:.3f}")
 
     pred_metrics = {}
-    if 'y_pred' in outputs and hasattr(data_eval, 'y'):
-        y_all = data_eval.y.cpu().numpy()
+    if 'y_pred' in outputs and hasattr(data, 'y'):
+        y_all = data.y.cpu().numpy()
         y_pred_all = outputs['y_pred'].detach().cpu().numpy()
-        if hasattr(data_eval, 'test_patient_idx') and data_eval.test_patient_idx.numel() > 0:
-            test_idx = data_eval.test_patient_idx.cpu().numpy()
+        if hasattr(data, 'test_patient_idx') and data.test_patient_idx.numel() > 0:
+            test_idx = data.test_patient_idx.cpu().numpy()
             pred_metrics = PredictionAnalyzer.compute_metrics(y_all[test_idx], y_pred_all[test_idx])
             print(f"Test AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f} (n={len(test_idx)})")
 
     logreg_results = {}
-    if config.get('_prediction_method') == 'logreg' and hasattr(data_eval, 'y'):
-        y = data_eval.y.cpu().numpy()
+    if config.get('_prediction_method') == 'logreg' and hasattr(data, 'y'):
+        y = data.y.cpu().numpy()
         logreg_results = LogisticRegressionBaseline.run(
-            z, labels, data_eval.patient_masks, y)
+            z, labels, data.patient_masks, y)
 
     clinical_results = {}
     if ('response' in adata.obs.columns and 'patient_id' in adata.obs.columns
-            and hasattr(data_eval, 'y')):
+            and hasattr(data, 'y')):
         fractions = ClinicalAssociationTest.compute_rare_fractions(
-            rare_labels, data_eval.patient_masks)
+            rare_labels, data.patient_masks)
         if not fractions.empty:
             therapy = adata.obs.groupby('patient_id')['therapy'].first().values \
                 if 'therapy' in adata.obs.columns else None
-            response = data_eval.y.cpu().numpy()
+            response = data.y.cpu().numpy()
             clinical_results = ClinicalAssociationTest.test_association(
                 fractions, response, therapy=therapy)
             ClinicalAssociationTest.summary(clinical_results)
@@ -242,7 +287,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     attn_weights = outputs.get('attention_weights')
     if attn_weights is not None and config.get('encoder_type', 'gat') == 'gat':
         try:
-            edge_index = data_eval.edge_index.cpu()
+            edge_index = data.edge_index.cpu()
             sel = AttentionAnalyzer.selectivity(attn_weights.cpu(), edge_index, len(z))
             attention_metrics['mean_selectivity'] = float(np.mean(sel))
             attention_metrics['std_selectivity'] = float(np.std(sel))
@@ -538,14 +583,29 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         trainer.train(data)
 
         model.eval()
-        data_eval = data.to(config['device'])
-        with torch.no_grad():
-            outputs = model(data_eval)
+        # Use chunked inference to avoid GPU OOM on large datasets
+        if data.num_nodes > 4096:
+            # For prediction, we need full-graph (predictor needs patient_masks)
+            # Run on CPU if too large for GPU
+            try:
+                data_dev = data.to(fold_config['device'])
+                with torch.no_grad():
+                    outputs = model(data_dev)
+            except RuntimeError:
+                print("  [warn] GPU OOM during CV eval, falling back to CPU")
+                model_cpu = model.cpu()
+                with torch.no_grad():
+                    outputs = model_cpu(data.to('cpu'))
+                model.to(fold_config['device'])
+        else:
+            data_dev = data.to(fold_config['device'])
+            with torch.no_grad():
+                outputs = model(data_dev)
 
-        y_all = data_eval.y.cpu().numpy()
+        y_all = data.y.cpu().numpy()
         y_pred_all = outputs['y_pred'].detach().cpu().numpy()
 
-        test_patient_idx = data_eval.test_patient_idx.cpu().numpy()
+        test_patient_idx = data.test_patient_idx.cpu().numpy()
         y_test = y_all[test_patient_idx]
         y_pred_test = y_pred_all[test_patient_idx]
 
