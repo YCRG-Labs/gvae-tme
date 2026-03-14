@@ -1,0 +1,419 @@
+{
+  "dataset": "melanoma",
+  "ablation": "spatial_only",
+  "config": {
+    "n_cells": 5000,
+    "n_genes": 2000,
+    "n_patients": 10,
+    "n_cell_types": 8,
+    "hidden_dim": 64,
+    "latent_dim": 32,
+    "n_heads": 4,
+    "dropout": 0.2,
+    "n_neg_samples": 5,
+    "lambda1": 1.0,
+    "lambda2": 0.5,
+    "beta": 0.01,
+    "beta_warmup_epochs": 50,
+    "free_bits": 0.5,
+    "gamma": 0.1,
+    "lr": 0.001,
+    "epochs_phase1": 300,
+    "epochs_phase2": 200,
+    "patience": 50,
+    "max_grad_norm": 1.0,
+    "device": "cuda",
+    "encoder_type": "gat",
+    "decoder_type": "zinb",
+    "gate_mode": "spatial_only",
+    "spatial_bias": 0.0,
+    "freeze_encoder": false,
+    "temperature": 0.1,
+    "rare_threshold": 2.0,
+    "k_mol": 15,
+    "num_neighbors": [
+      15,
+      10
+    ]
+  },
+  "phase1_metrics": {
+    "loss_adj": 1.4602787494659424,
+    "loss_expr": 0.19393286108970642
+  },
+  "clustering": {
+    "n_clusters": 4,
+    "silhouette": 0.07898250222206116,
+    "resolution": 0.5,
+    "ari_stability": {
+      "mean_ari": 0.8703139815623758,
+      "std_ari": 0.006030537295939126,
+      "n_runs": 20
+    }
+  },
+  "prediction": {
+    "auroc": 0.75,
+    "auprc": 0.5833333333333333,
+    "accuracy": 0.6666666666666666,
+    "balanced_accuracy": 0.5,
+    "precision": 0.0,
+    "recall": 0.0,
+    "specificity": 1.0,
+    "f1": 0.0
+  },
+  "batch_mixing": {
+    "rejection_rate": 0.5736,
+    "mean_p_value": 0.13996587137703687,
+    "n_batches": 32,
+    "batch_entropy": 0.7671252119700331
+  },
+  "rare_cells": {
+    "n_rare": 498,
+    "threshold": 2.0,
+    "method": "kl",
+    "rare_markers": {
+      "100": [
+        "RP11-1143G9.4",
+        "LYZ",
+        "CD14",
+        "IFI30",
+        "S100A9",
+        "FCER1G",
+        "ANXA1",
+        "TYROBP",
+        "S100A11",
+        "S100A10",
+        "CST3",
+        "FCN1",
+        "ANXA2",
+        "CTSB",
+        "C1QA",
+        "PGAM1",
+        "AIG1P1",
+        "RN7SKP268",
+        "SNORD99",
+        "RNU6-399P",
+        "CR381653.1",
+        "RP11-314C9.2",
+        "RNY4P6",
+        "MIR3935"
+      ],
+      "101": [
+        "IGJ",
+        "TCL1A",
+        "IGKC",
+        "VN1R107P",
+        "RNY4P4",
+        "NXPE2P1",
+        "RP11-480G7.3",
+        "RP11-109L13.5",
+        "RP5-1154L15.1",
+        "MIR378I",
+        "RP11-338N10.3",
+        "RP11-510D21.1",
+        "RP11-589C21.2",
+        "LA16c-4G1.4"
+      ],
+      "102": [
+        "TRAV21",
+        "RNU6-97P",
+        "SNORD14E",
+        "TRBV19",
+        "AC000003.1",
+        "RNA5SP91",
+        "RNA5SP87",
+        "TAF9P3",
+        "RNU6-1306P",
+        "RNA5SP74",
+        "RNU6-249P",
+        "TRNAI2"
+      ],
+      "103": [
+        "RNU6-130P",
+        "RNY4P17",
+        "RNY4P5",
+        "MIR548J",
+        "MIR1182",
+        "RNU4-16P",
+        "RN7SL589P",
+        "RNU6-399P",
+        "MIR320B2",
+        "RN7SL364P"
+      ],
+      "104": [
+        "IGJ",
+        "IGKC",
+        "GPR183",
+        "TCL1A",
+        "GZMB",
+        "HERPUD1",
+        "IGHM",
+        "CST3",
+        "TYROBP",
+        "FCER1G",
+        "ALOX5AP",
+        "HLA-DRA",
+        "MT-TQ",
+        "OR12D2",
+        "RN7SL761P",
+        "RN7SKP109",
+        "FDCSP",
+        "CTD-2529P6.4",
+        "IGLV7-35",
+        "TAAR7P",
+        "RN7SL415P"
+      ],
+      "105": [
+        "RN7SKP77",
+        "RNU6-670P",
+        "RNU6-887P",
+        "RNU6-396P",
+        "SNORD67",
+        "XXbac-BPG170G13.31",
+        "RP11-44K6.2",
+        "MIR3945",
+        "RNA5SP467",
+        "RNU4-78P",
+        "RP11-857B24.2",
+        "AC079781.1"
+      ],
+      "106": [
+        "RP11-479G22.6",
+        "SNORD125",
+        "RNA5SP146",
+        "RNU6ATAC25P",
+        "MIR4524B",
+        "CTD-2582M21.1"
+      ],
+      "107": [
+        "IGKC",
+        "TCL1A",
+        "IGJ",
+        "LA16c-4G1.4",
+        "MIR378I",
+        "RP11-589C21.2",
+        "RN7SKP265",
+        "RNU4-20P",
+        "SNORA70F",
+        "RP11-109L13.5",
+        "RP11-561C5.7",
+        "RP11-480G7.3",
+        "RN7SL727P",
+        "RN7SKP179",
+        "AC138965.1",
+        "MIR604",
+        "NXPE2P1",
+        "AC015660.1"
+      ],
+      "108": [
+        "RP11-157J24.2",
+        "CCL1",
+        "AP003354.1",
+        "RNU6-1300P",
+        "RP11-331O9.6",
+        "RP11-29O13.1",
+        "RP11-162J8.3",
+        "RNU2-17P",
+        "RNA5SP212",
+        "AC117372.1",
+        "MIR194-1",
+        "RN7SL671P",
+        "DUXAP1",
+        "MIR3945",
+        "RNU1-33P",
+        "RP11-857B24.2",
+        "SNORD67",
+        "XXbac-BPG170G13.31",
+        "RP11-44K6.2",
+        "RP11-352B15.5",
+        "RNU4-59P",
+        "RNU6-975P",
+        "RNU6-887P",
+        "RNU6-828P",
+        "RNU6-163P",
+        "RN7SL620P"
+      ],
+      "109": [
+        "UBE2V2P4",
+        "RNU11",
+        "MIR425",
+        "SNRPGP12",
+        "RNU6-504P",
+        "RN7SL753P",
+        "MIR4524B",
+        "RP1-136J15.1",
+        "RNA5SP240"
+      ]
+    },
+    "rare_gsea": {
+      "100": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "101": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "102": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "103": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "104": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "105": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "106": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "107": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "108": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      },
+      "109": {
+        "MSigDB_Hallmark_2020": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "GO_Biological_Process_2023": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        },
+        "KEGG_2021_Human": {
+          "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+        }
+      }
+    },
+    "immunosuppressive_signatures": {
+      "Treg": {
+        "note": "No signature genes found in HVG set",
+        "n_available": 0,
+        "n_total": 5
+      },
+      "M2_macrophage": {
+        "note": "No signature genes found in HVG set",
+        "n_available": 0,
+        "n_total": 5
+      },
+      "MDSC": {
+        "rare_mean": 0.216840460896492,
+        "nonrare_mean": -0.0069093708880245686,
+        "effect_size": 0.6002439347363938,
+        "p_value": 0.1526307612657547,
+        "u_statistic": 4037909.0,
+        "n_available": 2,
+        "n_total": 5
+      },
+      "Exhausted_T": {
+        "note": "No signature genes found in HVG set",
+        "n_available": 0,
+        "n_total": 5
+      }
+    }
+  },
+  "spatial_validation": {},
+  "gate": {
+    "mean": 1.0,
+    "std": 0.0
+  },
+  "logreg_baseline": {},
+  "clinical_association": {
+    "features": [],
+    "note": "Logit fit failed: Singular matrix"
+  },
+  "gsea": {
+    "0": {
+      "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+    },
+    "1": {
+      "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+    },
+    "2": {
+      "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+    },
+    "3": {
+      "error": "Invalid organism 'Human'. Valid options are: c. elegans, caenorhabditis elegans, celegans, d. melanogaster, d. rerio, danio rerio, drosophila, drosophila melanogaster, enrichr, fish, fly, h. sapiens, homo sapiens, hs, hsapiens, human, m. musculus, mm, mouse, mus musculus, nematode, s. cerevisiae, saccharomyces, saccharomyces cerevisiae, worm, yeast, zebrafish"
+    }
+  },
+  "ligand_receptor": {
+    "note": "No L-R pairs found in gene set",
+    "n_valid": 0
+  },
+  "attention": {
+    "mean_selectivity": 0.2124936943779981,
+    "std_selectivity": 0.23830741694408647
+  },
+  "cell_types": {}
+}
