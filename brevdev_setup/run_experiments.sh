@@ -1,5 +1,6 @@
 #!/bin/bash
 # Don't use set -e — continue experiments if one fails
+set -o pipefail
 
 echo "=== GVAE-TME: Full Paper Experiments ==="
 
@@ -44,6 +45,19 @@ if [ -f "data/processed/breast.h5ad" ]; then
     if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Breast ==="
         cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log && cd ..
+    fi
+fi
+
+echo ""
+echo "=========================================="
+echo "  2c. Cross-Validation: Colorectal"
+echo "=========================================="
+if [ -f "data/processed/colorectal.h5ad" ]; then
+    python3 train.py --config full --data colorectal --cv --n-folds 5 --batch-size 512 --max-cells 200000 --n-permutations 1000 \
+        2>&1 | tee outputs/colorectal_cv.log
+    if [ -f "outputs/colorectal/adata_analysis.h5ad" ]; then
+        echo "=== Generating plots: Colorectal ==="
+        cd analysis && python3 plots.py --data ../outputs/colorectal/adata_analysis.h5ad 2>&1 | tee ../outputs/colorectal_plots.log && cd ..
     fi
 fi
 
@@ -114,6 +128,13 @@ if [ -f "data/processed/nsclc_ici.h5ad" ]; then
     echo "--- Benchmark CV: NSCLC ICI (GVAE vs scVI vs Scanpy) ---"
     python3 benchmark.py --config full --data nsclc_ici --methods gvae,scvi,scanpy --batch-size 512 --max-cells 200000 --cv \
         2>&1 | tee outputs/nsclc_ici_benchmark.log
+fi
+
+if [ -f "data/processed/colorectal.h5ad" ]; then
+    echo ""
+    echo "--- Benchmark CV: Colorectal (GVAE vs scVI vs Scanpy) ---"
+    python3 benchmark.py --config full --data colorectal --methods gvae,scvi,scanpy --batch-size 512 --max-cells 200000 --cv \
+        2>&1 | tee outputs/colorectal_benchmark.log
 fi
 
 echo ""

@@ -1,6 +1,5 @@
 #!/bin/bash
-set -e
-
+# Don't use set -e — torch-sparse may fail to build but we still need optional deps
 echo "=== GVAE-TME: Brev GPU Environment Setup ==="
 
 if [ ! -d ".git" ]; then

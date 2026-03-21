@@ -1,5 +1,7 @@
 #!/bin/bash
 # Don't use set -e — continue if one dataset fails
+# Use pipefail so tee doesn't mask Python errors
+set -o pipefail
 echo "=== GVAE-TME: Preprocess All Datasets ==="
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
