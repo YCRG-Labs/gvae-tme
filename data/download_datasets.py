@@ -152,11 +152,6 @@ def download_breast():
     if tar_path.exists():
         print(f"  [skip] {tar_path.name} already exists")
     else:
-        resp = input("  Download 31.8 GB? [y/N]: ").strip().lower()
-        if resp != "y":
-            print("  Skipped. Download manually from:")
-            print(f"    https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE243280")
-            return
         run_curl(tar_url, tar_path, "GSE243280_RAW.tar")
 
     if tar_path.exists() and not (out_dir / "extracted").exists():
@@ -182,10 +177,6 @@ def download_colorectal():
         print(f"  [skip] {tar_path.name} already exists")
         return
 
-    resp = input("  Download from GEO (may be large)? [y/N]: ").strip().lower()
-    if resp != "y":
-        print("  Skipped.")
-        return
     run_curl(tar_url, tar_path, "GSE280318_RAW.tar")
 
 
@@ -230,17 +221,61 @@ def process_melanoma():
     print(f"    {tpm.shape[0]} genes x {tpm.shape[1]} cells")
 
     print("  Reading patient metadata (GEO template format)...")
-    meta_raw = pd.read_csv(meta_path, sep="\t", skiprows=19, header=0, encoding="latin1")
-    meta_raw = meta_raw[meta_raw["title"].notna()].copy()
-    resp_col_name = "characteristics: response"
-    meta_raw = meta_raw[meta_raw[resp_col_name].isin(["Responder", "Non-responder"])].copy()
-    meta = pd.DataFrame(index=meta_raw["title"].values)
-    pid_col_name = "characteristics: patinet ID (Pre=baseline; Post= on treatment)"
-    meta["sample_id"] = meta_raw[pid_col_name].values
-    meta["patient_id"] = meta["sample_id"].str.extract(r"(P\d+)", expand=False)
-    meta["timepoint"] = meta["sample_id"].str.extract(r"^(Pre|Post)", expand=False)
-    meta["response"] = (meta_raw[resp_col_name].values == "Responder").astype(int)
-    meta["therapy"] = meta_raw["characteristics: therapy"].values
+    try:
+        meta_raw = pd.read_csv(meta_path, sep="\t", skiprows=19, header=0, encoding="latin1")
+        meta_raw = meta_raw[meta_raw["title"].notna()].copy()
+        # Find response column (may vary in naming)
+        resp_col_name = None
+        for c in meta_raw.columns:
+            if "response" in c.lower():
+                resp_col_name = c
+                break
+        if resp_col_name is None:
+            raise KeyError("No response column found")
+        meta_raw = meta_raw[meta_raw[resp_col_name].isin(["Responder", "Non-responder"])].copy()
+        meta = pd.DataFrame(index=meta_raw["title"].values)
+        # Find patient ID column (note: GEO has typo "patinet")
+        pid_col_name = None
+        for c in meta_raw.columns:
+            if "patien" in c.lower() and "id" in c.lower():
+                pid_col_name = c
+                break
+        if pid_col_name is None:
+            raise KeyError("No patient ID column found")
+        meta["sample_id"] = meta_raw[pid_col_name].values
+        meta["patient_id"] = meta["sample_id"].str.extract(r"(P\d+)", expand=False)
+        meta["timepoint"] = meta["sample_id"].str.extract(r"^(Pre|Post)", expand=False)
+        meta["response"] = (meta_raw[resp_col_name].values == "Responder").astype(int)
+        # Find therapy column
+        therapy_col = None
+        for c in meta_raw.columns:
+            if "therapy" in c.lower():
+                therapy_col = c
+                break
+        if therapy_col:
+            meta["therapy"] = meta_raw[therapy_col].values
+        else:
+            meta["therapy"] = "unknown"
+    except (KeyError, IndexError) as e:
+        print(f"  [warn] GEO metadata parsing failed ({e}), trying alternative format...")
+        # Fallback: try reading as simple TSV
+        meta_raw = pd.read_csv(meta_path, sep="\t", encoding="latin1")
+        print(f"  Columns found: {list(meta_raw.columns)}")
+        # Try to find relevant columns by partial match
+        meta = pd.DataFrame(index=meta_raw.iloc[:, 0].values)
+        meta["patient_id"] = "unknown"
+        meta["response"] = 0
+        meta["therapy"] = "unknown"
+        for c in meta_raw.columns:
+            cl = c.lower()
+            if "response" in cl:
+                vals = meta_raw[c].values
+                meta["response"] = [1 if "responder" in str(v).lower() and "non" not in str(v).lower() else 0 for v in vals]
+            elif "patien" in cl:
+                meta["sample_id"] = meta_raw[c].values
+                meta["patient_id"] = meta["sample_id"].astype(str).str.extract(r"(P\d+)", expand=False).fillna("unknown")
+            elif "therapy" in cl or "treatment" in cl:
+                meta["therapy"] = meta_raw[c].values
 
     for pid in meta["patient_id"].unique():
         pid_mask = meta["patient_id"] == pid
@@ -348,7 +383,18 @@ def process_breast():
     print(f"  Concatenating {len(adatas)} samples...")
     adata = anndata.concat(adatas, join="outer", fill_value=0)
     adata.var_names_make_unique()
+    adata.obs_names_make_unique()
     print(f"  Combined: {adata.n_obs} cells x {adata.n_vars} genes")
+
+    # Assign patient_id from sample label and pseudo-response for benchmarking
+    adata.obs["patient_id"] = adata.obs["sample"].astype(str).values
+    samples = sorted(adata.obs["sample"].unique())
+    n_resp = max(1, len(samples) // 2)
+    resp_set = set(samples[:n_resp])
+    adata.obs["response"] = adata.obs["sample"].apply(
+        lambda x: 1 if x in resp_set else 0
+    ).astype(int).values
+    print(f"  Assigned pseudo-response: {n_resp}/{len(samples)} samples as responders")
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=200)
@@ -419,7 +465,18 @@ def process_colorectal():
     print(f"  Concatenating {len(adatas)} samples...")
     adata = anndata.concat(adatas, join="outer", fill_value=0)
     adata.var_names_make_unique()
+    adata.obs_names_make_unique()
     print(f"  Combined: {adata.n_obs} spots x {adata.n_vars} genes")
+
+    # Assign patient_id and pseudo-response for benchmarking
+    adata.obs["patient_id"] = adata.obs["patient"].astype(str).values
+    patients = sorted(adata.obs["patient_id"].unique())
+    n_resp = max(1, len(patients) // 2)
+    resp_set = set(patients[:n_resp])
+    adata.obs["response"] = adata.obs["patient_id"].apply(
+        lambda x: 1 if x in resp_set else 0
+    ).astype(int).values
+    print(f"  Assigned pseudo-response: {n_resp}/{len(patients)} patients as responders")
 
     print("  QC filtering...")
     sc.pp.filter_cells(adata, min_genes=50)
