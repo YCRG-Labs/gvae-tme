@@ -217,15 +217,17 @@ def _parse_melanoma_metadata(meta_path, cell_ids):
     """
     import pandas as pd
 
-    # Step 1: Find the header row by scanning for 'title' or 'response'
     header_row = None
     with open(meta_path, encoding="latin1") as f:
         for i, line in enumerate(f):
-            lower = line.lower()
-            if "title" in lower and ("response" in lower or "patient" in lower or "patien" in lower):
+            fields = [f.strip().lower() for f in line.split("\t")]
+            has_title = any("title" == f or "title" in f for f in fields if len(f) < 40)
+            has_response = any("response" in f for f in fields if len(f) < 60)
+            has_patient = any("patient" in f or "patinet" in f or "patin" in f for f in fields if len(f) < 80)
+            if has_title and (has_response or has_patient) and len(fields) >= 3:
                 header_row = i
                 break
-            if i > 100:  # give up after 100 lines
+            if i > 200:
                 break
 
     if header_row is not None:
@@ -430,6 +432,8 @@ def process_melanoma():
 
     adata = _run_scrublet(adata)
 
+    print("  [note] GSE120575 provides TPM (not raw counts). The 'counts' layer stores")
+    print("         TPM values; ZINB decoder assumptions are approximate for this dataset.")
     adata.layers['counts'] = adata.X.copy()
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
@@ -644,24 +648,34 @@ def process_colorectal():
     sc.pp.pca(adata, n_comps=n_comps)
 
     has_spatial = False
+    import pandas as pd
+    pos_candidates = []
     for pos_file in ['tissue_positions.csv', 'tissue_positions_list.csv']:
-        pos_path = raw_dir / pos_file
-        if pos_path.exists():
-            import pandas as pd
-            pos_df = pd.read_csv(pos_path, header=None)
-            if pos_df.shape[1] >= 6:
-                barcode_to_pos = dict(zip(pos_df[0], zip(pos_df[4], pos_df[5])))
-                coords = np.zeros((adata.n_obs, 2), dtype=np.float32)
-                matched = 0
-                for idx, bc in enumerate(adata.obs_names):
-                    if bc in barcode_to_pos:
-                        coords[idx] = barcode_to_pos[bc]
-                        matched += 1
-                if matched > adata.n_obs * 0.5:
-                    adata.obsm["spatial"] = coords
-                    has_spatial = True
-                    print(f"  Loaded spatial coords for {matched}/{adata.n_obs} spots")
-            break
+        pos_candidates.append(raw_dir / pos_file)
+        pos_candidates.extend(sorted(raw_dir.rglob(pos_file)))
+    seen = set()
+    for pos_path in pos_candidates:
+        pos_str = str(pos_path)
+        if pos_str in seen or not pos_path.exists():
+            continue
+        seen.add(pos_str)
+        print(f"  Trying spatial coords from {pos_path}...")
+        pos_df = pd.read_csv(pos_path, header=None)
+        if pos_df.shape[1] >= 6:
+            barcode_to_pos = dict(zip(pos_df[0], zip(pos_df[4], pos_df[5])))
+            coords = np.zeros((adata.n_obs, 2), dtype=np.float32)
+            matched = 0
+            for idx, bc in enumerate(adata.obs_names):
+                if bc in barcode_to_pos:
+                    coords[idx] = barcode_to_pos[bc]
+                    matched += 1
+            if matched > adata.n_obs * 0.5:
+                adata.obsm["spatial"] = coords
+                has_spatial = True
+                print(f"  Loaded spatial coords for {matched}/{adata.n_obs} spots from {pos_path.name}")
+                break
+            else:
+                print(f"    Only {matched}/{adata.n_obs} matched, trying next...")
 
     if not has_spatial:
         sc.pp.neighbors(adata, n_neighbors=15)
