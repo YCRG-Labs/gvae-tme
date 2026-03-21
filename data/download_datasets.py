@@ -188,6 +188,121 @@ def download_nsclc():
     print(f"  {info['manual_instructions']}")
 
 
+def _parse_melanoma_metadata(meta_path, cell_ids):
+    """Robustly parse GSE120575 patient metadata regardless of format.
+
+    The GEO SOFT file has variable header lengths and column names
+    (including typos like 'patinet'). This auto-detects everything.
+
+    Returns a DataFrame indexed by cell IDs with columns:
+        patient_id, sample_id, timepoint, response, therapy
+    """
+    import pandas as pd
+
+    # Step 1: Find the header row by scanning for 'title' or 'response'
+    header_row = None
+    with open(meta_path, encoding="latin1") as f:
+        for i, line in enumerate(f):
+            lower = line.lower()
+            if "title" in lower and ("response" in lower or "patient" in lower or "patien" in lower):
+                header_row = i
+                break
+            if i > 100:  # give up after 100 lines
+                break
+
+    if header_row is not None:
+        print(f"    Auto-detected header at row {header_row}")
+        meta_raw = pd.read_csv(meta_path, sep="\t", skiprows=header_row,
+                               header=0, encoding="latin1")
+    else:
+        print("    No header auto-detected, reading as plain TSV...")
+        meta_raw = pd.read_csv(meta_path, sep="\t", encoding="latin1")
+
+    # Drop empty rows
+    meta_raw = meta_raw.dropna(how="all")
+    print(f"    Columns: {list(meta_raw.columns)}")
+    print(f"    Rows: {len(meta_raw)}")
+
+    # Step 2: Find key columns by fuzzy matching
+    def _find_col(keywords, columns):
+        """Find a column whose name contains ALL given keywords (case-insensitive)."""
+        for c in columns:
+            cl = c.lower()
+            if all(k in cl for k in keywords):
+                return c
+        return None
+
+    title_col = _find_col(["title"], meta_raw.columns)
+    if title_col is None:
+        # First column is probably cell IDs
+        title_col = meta_raw.columns[0]
+    print(f"    Cell ID column: '{title_col}'")
+
+    resp_col = _find_col(["response"], meta_raw.columns)
+    # 'patien' catches both 'patient' and the GEO typo 'patinet'
+    pid_col = (_find_col(["patien", "id"], meta_raw.columns) or
+               _find_col(["patien"], meta_raw.columns))
+    therapy_col = (_find_col(["therapy"], meta_raw.columns) or
+                   _find_col(["treatment"], meta_raw.columns))
+
+    print(f"    Response column: '{resp_col}'")
+    print(f"    Patient ID column: '{pid_col}'")
+    print(f"    Therapy column: '{therapy_col}'")
+
+    # Step 3: Filter to valid cells (title must be in our cell_ids)
+    meta_raw = meta_raw[meta_raw[title_col].notna()].copy()
+
+    # Step 4: Build output DataFrame
+    meta = pd.DataFrame(index=meta_raw[title_col].values)
+
+    # Response: map any variant of Responder/Non-responder to 1/0
+    if resp_col:
+        raw_resp = meta_raw[resp_col].astype(str).values
+        response = []
+        for v in raw_resp:
+            vl = v.strip().lower()
+            if "non" in vl or vl.startswith("nr") or vl.startswith("n-r"):
+                response.append(0)
+            elif "responder" in vl or vl == "r":
+                response.append(1)
+            else:
+                response.append(-1)  # unknown / non-evaluable
+        meta["response"] = response
+        # Keep only valid response labels
+        meta = meta[meta["response"].isin([0, 1])].copy()
+        meta_raw = meta_raw.loc[meta_raw[title_col].isin(meta.index)].copy()
+        print(f"    Response: {(meta['response']==1).sum()} responder, "
+              f"{(meta['response']==0).sum()} non-responder cells")
+    else:
+        print("    [warn] No response column found, setting all to 0")
+        meta["response"] = 0
+
+    # Patient ID: extract 'P1', 'P2', etc. from values like 'Pre_P1', 'Post_P2'
+    if pid_col:
+        raw_pids = meta_raw.set_index(title_col).reindex(meta.index)[pid_col].astype(str).values
+        meta["sample_id"] = raw_pids
+        # Extract bare patient number
+        extracted = pd.Series(raw_pids).str.extract(r"(P\d+)", expand=False)
+        meta["patient_id"] = extracted.fillna("unknown").values
+        # Extract timepoint
+        meta["timepoint"] = pd.Series(raw_pids).str.extract(
+            r"(Pre|Post)", expand=False
+        ).fillna("unknown").values
+    else:
+        print("    [warn] No patient ID column found")
+        meta["sample_id"] = "unknown"
+        meta["patient_id"] = "unknown"
+        meta["timepoint"] = "unknown"
+
+    # Therapy
+    if therapy_col:
+        meta["therapy"] = meta_raw.set_index(title_col).reindex(meta.index)[therapy_col].astype(str).values
+    else:
+        meta["therapy"] = "unknown"
+
+    return meta
+
+
 def process_melanoma():
     print("\n=== Processing melanoma (GSE120575) into h5ad ===")
     raw_dir = RAW_DIR / "melanoma"
@@ -208,74 +323,43 @@ def process_melanoma():
         return
 
     print("  Reading TPM matrix (this may take a minute)...")
+    # Peek at first 3 lines to detect format
     with open(tpm_path) as f:
-        header_line = f.readline().rstrip("\n")
-        patient_line = f.readline().rstrip("\n")
-    cell_ids = header_line.split("\t")[1:]
-    sample_ids = patient_line.split("\t")[1:]
-    tpm = pd.read_csv(tpm_path, sep="\t", index_col=0, skiprows=[1],
+        line1 = f.readline().rstrip("\n")
+        line2 = f.readline().rstrip("\n")
+        line3 = f.readline().rstrip("\n")
+
+    cols1 = line1.split("\t")
+    cols2 = line2.split("\t")
+    cols3 = line3.split("\t")
+
+    # Line 1 is always the header with cell IDs
+    cell_ids = cols1[1:]
+
+    # Detect if line 2 is sample IDs (text) or gene data (numeric)
+    # If line 2 values (after col 0) look like patient IDs (Pre_P1, etc.), skip it
+    try:
+        float(cols2[1])
+        # Line 2 is numeric → no sample ID row, just gene data
+        skip_rows = []
+        print("    Format: header + gene rows (no sample ID row)")
+    except (ValueError, IndexError):
+        # Line 2 is text → it's a sample ID row, skip it when reading data
+        skip_rows = [1]
+        print("    Format: header + sample IDs + gene rows")
+
+    tpm = pd.read_csv(tpm_path, sep="\t", index_col=0, skiprows=skip_rows,
                        on_bad_lines="warn")
+    # Fix column count mismatch (trailing empty column)
     if tpm.shape[1] == len(cell_ids) + 1:
         tpm = tpm.iloc[:, :-1]
+    elif tpm.shape[1] < len(cell_ids):
+        cell_ids = cell_ids[:tpm.shape[1]]
     tpm.columns = cell_ids
     print(f"    {tpm.shape[0]} genes x {tpm.shape[1]} cells")
 
-    print("  Reading patient metadata (GEO template format)...")
-    try:
-        meta_raw = pd.read_csv(meta_path, sep="\t", skiprows=19, header=0, encoding="latin1")
-        meta_raw = meta_raw[meta_raw["title"].notna()].copy()
-        # Find response column (may vary in naming)
-        resp_col_name = None
-        for c in meta_raw.columns:
-            if "response" in c.lower():
-                resp_col_name = c
-                break
-        if resp_col_name is None:
-            raise KeyError("No response column found")
-        meta_raw = meta_raw[meta_raw[resp_col_name].isin(["Responder", "Non-responder"])].copy()
-        meta = pd.DataFrame(index=meta_raw["title"].values)
-        # Find patient ID column (note: GEO has typo "patinet")
-        pid_col_name = None
-        for c in meta_raw.columns:
-            if "patien" in c.lower() and "id" in c.lower():
-                pid_col_name = c
-                break
-        if pid_col_name is None:
-            raise KeyError("No patient ID column found")
-        meta["sample_id"] = meta_raw[pid_col_name].values
-        meta["patient_id"] = meta["sample_id"].str.extract(r"(P\d+)", expand=False)
-        meta["timepoint"] = meta["sample_id"].str.extract(r"^(Pre|Post)", expand=False)
-        meta["response"] = (meta_raw[resp_col_name].values == "Responder").astype(int)
-        # Find therapy column
-        therapy_col = None
-        for c in meta_raw.columns:
-            if "therapy" in c.lower():
-                therapy_col = c
-                break
-        if therapy_col:
-            meta["therapy"] = meta_raw[therapy_col].values
-        else:
-            meta["therapy"] = "unknown"
-    except (KeyError, IndexError) as e:
-        print(f"  [warn] GEO metadata parsing failed ({e}), trying alternative format...")
-        # Fallback: try reading as simple TSV
-        meta_raw = pd.read_csv(meta_path, sep="\t", encoding="latin1")
-        print(f"  Columns found: {list(meta_raw.columns)}")
-        # Try to find relevant columns by partial match
-        meta = pd.DataFrame(index=meta_raw.iloc[:, 0].values)
-        meta["patient_id"] = "unknown"
-        meta["response"] = 0
-        meta["therapy"] = "unknown"
-        for c in meta_raw.columns:
-            cl = c.lower()
-            if "response" in cl:
-                vals = meta_raw[c].values
-                meta["response"] = [1 if "responder" in str(v).lower() and "non" not in str(v).lower() else 0 for v in vals]
-            elif "patien" in cl:
-                meta["sample_id"] = meta_raw[c].values
-                meta["patient_id"] = meta["sample_id"].astype(str).str.extract(r"(P\d+)", expand=False).fillna("unknown")
-            elif "therapy" in cl or "treatment" in cl:
-                meta["therapy"] = meta_raw[c].values
+    print("  Reading patient metadata...")
+    meta = _parse_melanoma_metadata(meta_path, cell_ids)
 
     for pid in meta["patient_id"].unique():
         pid_mask = meta["patient_id"] == pid
@@ -356,28 +440,53 @@ def process_breast():
         print(f"  [error] Missing dependency: {e}")
         return
 
-    h5_files = [
+    # Try known filenames first, then fall back to auto-discovery
+    known_h5 = [
         ("5p_scrna", "GSM7782696_5p_count_filtered_feature_bc_matrix.h5"),
         ("3p_scrna", "GSM7782697_3p_count_filtered_feature_bc_matrix.h5"),
         ("visium_raw", "GSM7782698_count_raw_feature_bc_matrix.h5"),
         ("visium_filt", "GSM7782699_filtered_feature_bc_matrix.h5"),
     ]
 
+    # Check if any known files exist
+    found_known = [(l, f) for l, f in known_h5 if (raw_dir / f).exists()]
+
+    if not found_known:
+        # Auto-discover: decompress any .h5.gz, then find all .h5 files
+        for gz in sorted(raw_dir.glob("*.h5.gz")):
+            out = Path(str(gz)[:-3])
+            if not out.exists():
+                print(f"  Decompressing {gz.name}...")
+                decompress_gz(gz, out)
+        all_h5 = sorted(raw_dir.glob("*.h5"))
+        # Filter out non-count files (cloupe, spatial, etc.)
+        all_h5 = [f for f in all_h5
+                   if not any(x in f.name.lower() for x in ["cloupe", "spatial", "xenium"])]
+        if all_h5:
+            print(f"  Auto-discovered {len(all_h5)} H5 files")
+            found_known = [(f.stem.split("_")[0], f.name) for f in all_h5]
+        else:
+            print(f"  [skip] No H5 files found in {raw_dir}. Run download/extract first.")
+            return
+
     adatas = []
-    for label, fname in h5_files:
+    for label, fname in found_known:
         path = raw_dir / fname
         if not path.exists():
             print(f"  [skip] {fname} not found")
             continue
         print(f"  Reading {label}: {fname}...")
-        ad = sc.read_10x_h5(str(path))
-        ad.var_names_make_unique()
-        ad.obs["sample"] = label
-        print(f"    {ad.n_obs} cells x {ad.n_vars} genes")
-        adatas.append(ad)
+        try:
+            ad = sc.read_10x_h5(str(path))
+            ad.var_names_make_unique()
+            ad.obs["sample"] = label
+            print(f"    {ad.n_obs} cells x {ad.n_vars} genes")
+            adatas.append(ad)
+        except Exception as e:
+            print(f"    [warn] Failed to read {fname}: {e}")
 
     if not adatas:
-        print("  [skip] No H5 files found. Run download/extract first.")
+        print("  [skip] No H5 files could be read.")
         return
 
     print(f"  Concatenating {len(adatas)} samples...")
@@ -440,6 +549,12 @@ def process_colorectal():
         print(f"  [error] Missing dependency: {e}")
         return
 
+    # Decompress any .h5.gz files first
+    for gz in sorted(raw_dir.glob("*.h5.gz")):
+        out = Path(str(gz)[:-3])
+        if not out.exists():
+            print(f"  Decompressing {gz.name}...")
+            decompress_gz(gz, out)
     h5_files = sorted([f for f in os.listdir(raw_dir) if f.endswith(".h5")])
     if not h5_files:
         print("  [skip] No H5 files found. Run download/extract first.")
@@ -449,18 +564,28 @@ def process_colorectal():
     adatas = []
     for i, fname in enumerate(h5_files):
         path = raw_dir / fname
-        ad = sc.read_10x_h5(str(path))
-        ad.var_names_make_unique()
-        m = re.search(r"_(P\d+)(CRC|NAT)_(BC\d+)_", fname)
-        if m:
-            ad.obs["patient"] = m.group(1)
-            ad.obs["tissue"] = m.group(2)
-        else:
-            ad.obs["patient"] = "unknown"
-            ad.obs["tissue"] = "unknown"
-        adatas.append(ad)
+        try:
+            ad = sc.read_10x_h5(str(path))
+            ad.var_names_make_unique()
+            # Try to extract patient/tissue from filename (e.g., _P1CRC_BC1_)
+            m = re.search(r"_(P\d+)(CRC|NAT)_(BC\d+)_", fname)
+            if m:
+                ad.obs["patient"] = m.group(1)
+                ad.obs["tissue"] = m.group(2)
+            else:
+                # Fallback: use GSM ID or filename stem as patient
+                gsm = re.search(r"(GSM\d+)", fname)
+                ad.obs["patient"] = gsm.group(1) if gsm else f"sample_{i}"
+                ad.obs["tissue"] = "unknown"
+            adatas.append(ad)
+        except Exception as e:
+            print(f"    [warn] Failed to read {fname}: {e}")
         if (i + 1) % 10 == 0:
             print(f"    {i+1}/{len(h5_files)} files read")
+
+    if not adatas:
+        print("  [skip] No H5 files could be read.")
+        return
 
     print(f"  Concatenating {len(adatas)} samples...")
     adata = anndata.concat(adatas, join="outer", fill_value=0)
