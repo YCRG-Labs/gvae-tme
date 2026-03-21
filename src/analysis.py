@@ -256,10 +256,15 @@ class AttentionAnalyzer:
 
         novel_gene_signatures = {}
         if novel:
-            novel_src = list(set(edge_index[0, i].item() for i in np.where(high_mask)[0]
-                                 if edge_attn[i] > attn_thresh and i < len(novel) + len(lr_matched)))
-            novel_tgt = list(set(edge_index[1, i].item() for i in np.where(high_mask)[0]
-                                 if edge_attn[i] > attn_thresh and i < len(novel) + len(lr_matched)))
+            novel_edge_indices = [idx for idx in np.where(high_mask)[0]
+                                  if not any(
+                                      (X[edge_index[0, idx].item(), var_to_idx[l]] > expr_threshold and
+                                       X[edge_index[1, idx].item(), var_to_idx[r]] > expr_threshold) or
+                                      (X[edge_index[1, idx].item(), var_to_idx[l]] > expr_threshold and
+                                       X[edge_index[0, idx].item(), var_to_idx[r]] > expr_threshold)
+                                      for l, r in valid_pairs)]
+            novel_src = list(set(edge_index[0, i].item() for i in novel_edge_indices))
+            novel_tgt = list(set(edge_index[1, i].item() for i in novel_edge_indices))
             if len(novel_src) >= 5 and len(novel_tgt) >= 5:
                 src_expr = X[novel_src[:100]].mean(axis=0)
                 tgt_expr = X[novel_tgt[:100]].mean(axis=0)
