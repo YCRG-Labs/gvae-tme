@@ -75,6 +75,20 @@ DOWNLOADS = {
 }
 
 
+def _hvg_with_fallback(adata, n_top_genes, layer='counts'):
+    try:
+        import scanpy as sc
+        sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor='seurat_v3', layer=layer)
+    except Exception as e:
+        import scanpy as sc
+        err = str(e).lower()
+        if any(k in err for k in ['skmisc', 'scikit-misc', 'loess', 'numpy.dtype size changed']):
+            print(f"  [warn] seurat_v3 unavailable ({type(e).__name__}: {e}), falling back to cell_ranger")
+            sc.pp.highly_variable_genes(adata, n_top_genes=n_top_genes, flavor='cell_ranger')
+        else:
+            raise
+
+
 def _run_scrublet(adata):
     try:
         import scrublet as scr
@@ -175,9 +189,13 @@ def download_colorectal():
 
     if tar_path.exists():
         print(f"  [skip] {tar_path.name} already exists")
-        return
+    else:
+        run_curl(tar_url, tar_path, "GSE280318_RAW.tar")
 
-    run_curl(tar_url, tar_path, "GSE280318_RAW.tar")
+    if tar_path.exists() and not (out_dir / "extracted").exists():
+        print("  Extracting tar...")
+        subprocess.run(["tar", "xf", str(tar_path), "-C", str(out_dir)])
+        (out_dir / "extracted").touch()
 
 
 def download_nsclc():
@@ -239,9 +257,11 @@ def _parse_melanoma_metadata(meta_path, cell_ids):
     print(f"    Cell ID column: '{title_col}'")
 
     resp_col = _find_col(["response"], meta_raw.columns)
-    # 'patien' catches both 'patient' and the GEO typo 'patinet'
-    pid_col = (_find_col(["patien", "id"], meta_raw.columns) or
-               _find_col(["patien"], meta_raw.columns))
+    pid_col = (_find_col(["patient", "id"], meta_raw.columns) or
+               _find_col(["patient"], meta_raw.columns) or
+               _find_col(["patinet", "id"], meta_raw.columns) or
+               _find_col(["patinet"], meta_raw.columns) or
+               _find_col(["patin"], meta_raw.columns))
     therapy_col = (_find_col(["therapy"], meta_raw.columns) or
                    _find_col(["treatment"], meta_raw.columns))
 
@@ -416,7 +436,7 @@ def process_melanoma():
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
 
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+    _hvg_with_fallback(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -521,7 +541,7 @@ def process_breast():
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+    _hvg_with_fallback(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -619,7 +639,7 @@ def process_colorectal():
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+    _hvg_with_fallback(adata, n_top_genes=n_top)
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 
@@ -693,7 +713,7 @@ def process_nsclc(max_cells_per_patient = 50):
         sc.pp.log1p(adata_sc)
         sc.pp.regress_out(adata_sc, ['total_counts', 'pct_counts_mt'])
         n_top = min(2000, adata_sc.n_vars)
-        sc.pp.highly_variable_genes(adata_sc, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+        _hvg_with_fallback(adata_sc, n_top_genes=n_top)
         n_comps = min(50, adata_sc.n_obs - 1, adata_sc.n_vars - 1)
         sc.pp.pca(adata_sc, n_comps=n_comps)
         coords = np.random.randn(adata_sc.n_obs, 2).astype(np.float32) * 100
@@ -766,7 +786,7 @@ def process_nsclc(max_cells_per_patient = 50):
         sc.pp.log1p(adata_vis)
         sc.pp.regress_out(adata_vis, ['total_counts', 'pct_counts_mt'])
         n_top = min(2000, adata_vis.n_vars)
-        sc.pp.highly_variable_genes(adata_vis, n_top_genes=n_top, flavor='seurat_v3', layer='counts')
+        _hvg_with_fallback(adata_vis, n_top_genes=n_top)
         n_comps = min(50, adata_vis.n_obs - 1, adata_vis.n_vars - 1)
         sc.pp.pca(adata_vis, n_comps=n_comps)
 
@@ -896,8 +916,9 @@ def process_nsclc_ici(max_cells_per_patient=1000):
         sc.pp.normalize_total(adata, target_sum=10000)
         sc.pp.log1p(adata)
         n_top = min(2000, adata.n_vars)
-        sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='cell_ranger')
-        sc.pp.scale(adata, max_value=10)
+        _hvg_with_fallback(adata, n_top_genes=n_top)
+        adata = adata[:, adata.var['highly_variable']].copy()
+        sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
         n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
         sc.pp.pca(adata, n_comps=n_comps)
 
@@ -1035,8 +1056,9 @@ def process_nsclc_ici(max_cells_per_patient=1000):
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     n_top = min(2000, adata.n_vars)
-    sc.pp.highly_variable_genes(adata, n_top_genes=n_top, flavor='cell_ranger')
-    sc.pp.scale(adata, max_value=10)
+    _hvg_with_fallback(adata, n_top_genes=n_top)
+    adata = adata[:, adata.var['highly_variable']].copy()
+    sc.pp.regress_out(adata, ['total_counts', 'pct_counts_mt'])
     n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
     sc.pp.pca(adata, n_comps=n_comps)
 

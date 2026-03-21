@@ -18,8 +18,8 @@ python3 -m pip install -r requirements.txt
 echo ""
 echo "=== Installing PyG sparse extensions (required for mini-batch training) ==="
 TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__.split('+')[0])")
-CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda.replace('.','') if torch.cuda.is_available() else 'cpu')")
-python3 -m pip install torch-sparse torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+cu${CUDA_VERSION}.html" 2>/dev/null || \
+CUDA_TAG=$(python3 -c "import torch; print('cu' + torch.version.cuda.replace('.','') if torch.cuda.is_available() else 'cpu')")
+python3 -m pip install torch-sparse torch-scatter -f "https://data.pyg.org/whl/torch-${TORCH_VERSION}+${CUDA_TAG}.html" 2>/dev/null || \
     python3 -m pip install torch-sparse torch-scatter || \
     echo "[warn] Could not install torch-sparse/scatter — mini-batch training will fall back to full-batch"
 

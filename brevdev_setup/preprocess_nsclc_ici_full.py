@@ -119,8 +119,16 @@ def main():
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
 
-    print("  Selecting 2000 HVGs (seurat_v3)...")
-    sc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', layer='counts')
+    print("  Selecting 2000 HVGs...")
+    try:
+        sc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', layer='counts')
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ['skmisc', 'scikit-misc', 'loess', 'numpy.dtype size changed']):
+            print(f"  [warn] seurat_v3 unavailable ({type(e).__name__}: {e}), falling back to cell_ranger")
+            sc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='cell_ranger')
+        else:
+            raise
 
     print(f"  Subsetting to HVGs before regress_out (avoids 268GB dense matrix)...")
     adata = adata[:, adata.var['highly_variable']].copy()

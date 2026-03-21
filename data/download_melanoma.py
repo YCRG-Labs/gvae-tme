@@ -165,7 +165,15 @@ def main():
     sc.pp.normalize_total(adata, target_sum=10000)
     sc.pp.log1p(adata)
     sc.pp.regress_out(adata, ["total_counts", "pct_counts_mt"])
-    sc.pp.highly_variable_genes(adata, n_top_genes=min(2000, adata.n_vars), flavor="seurat_v3", layer="counts")
+    try:
+        sc.pp.highly_variable_genes(adata, n_top_genes=min(2000, adata.n_vars), flavor="seurat_v3", layer="counts")
+    except Exception as e:
+        err = str(e).lower()
+        if any(k in err for k in ['skmisc', 'loess', 'numpy.dtype size changed']):
+            print(f"  [warn] seurat_v3 unavailable ({type(e).__name__}: {e}), falling back to cell_ranger")
+            sc.pp.highly_variable_genes(adata, n_top_genes=min(2000, adata.n_vars), flavor="cell_ranger")
+        else:
+            raise
     sc.pp.pca(adata, n_comps=min(50, adata.n_obs - 1, adata.n_vars - 1))
 
     # 8. Save

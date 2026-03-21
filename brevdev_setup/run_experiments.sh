@@ -18,7 +18,7 @@ if [ -f "data/processed/melanoma.h5ad" ]; then
         2>&1 | tee outputs/melanoma_cv.log
     if [ -f "outputs/melanoma/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Melanoma ==="
-        cd analysis && python3 plots.py --data ../outputs/melanoma/adata_analysis.h5ad 2>&1 | tee ../outputs/melanoma_plots.log && cd ..
+        ( cd analysis && python3 plots.py --data ../outputs/melanoma/adata_analysis.h5ad 2>&1 | tee ../outputs/melanoma_plots.log )
     fi
 fi
 
@@ -31,7 +31,7 @@ if [ -f "data/processed/nsclc_ici.h5ad" ]; then
         2>&1 | tee outputs/nsclc_ici_cv.log
     if [ -f "outputs/nsclc_ici/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: NSCLC ICI ==="
-        cd analysis && python3 plots.py --data ../outputs/nsclc_ici/adata_analysis.h5ad 2>&1 | tee ../outputs/nsclc_ici_plots.log && cd ..
+        ( cd analysis && python3 plots.py --data ../outputs/nsclc_ici/adata_analysis.h5ad 2>&1 | tee ../outputs/nsclc_ici_plots.log )
     fi
 fi
 
@@ -44,7 +44,7 @@ if [ -f "data/processed/breast.h5ad" ]; then
         2>&1 | tee outputs/breast_cv.log
     if [ -f "outputs/breast/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Breast ==="
-        cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log && cd ..
+        ( cd analysis && python3 plots.py --data ../outputs/breast/adata_analysis.h5ad 2>&1 | tee ../outputs/breast_plots.log )
     fi
 fi
 
@@ -57,7 +57,7 @@ if [ -f "data/processed/colorectal.h5ad" ]; then
         2>&1 | tee outputs/colorectal_cv.log
     if [ -f "outputs/colorectal/adata_analysis.h5ad" ]; then
         echo "=== Generating plots: Colorectal ==="
-        cd analysis && python3 plots.py --data ../outputs/colorectal/adata_analysis.h5ad 2>&1 | tee ../outputs/colorectal_plots.log && cd ..
+        ( cd analysis && python3 plots.py --data ../outputs/colorectal/adata_analysis.h5ad 2>&1 | tee ../outputs/colorectal_plots.log )
     fi
 fi
 

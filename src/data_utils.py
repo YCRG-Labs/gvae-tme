@@ -133,14 +133,14 @@ def _get_patient_response(adata, pid):
 
 
 def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r_far_factor=5.0, k_neg=10, has_spatial=None):
-    pca = adata.obsm['X_pca']
+    pca = np.ascontiguousarray(adata.obsm['X_pca'])
     n_cells = pca.shape[0]
     x = torch.tensor(pca, dtype=torch.float32)
     if has_spatial is None:
         has_spatial = spatial_key in adata.obsm and not np.allclose(adata.obsm[spatial_key], 0)
     mol_src, mol_dst, mol_wts = _build_molecular_graph(pca, k=k_mol)
     if has_spatial:
-        coords = adata.obsm[spatial_key]
+        coords = np.ascontiguousarray(adata.obsm[spatial_key])
         coords_t = torch.tensor(coords, dtype=torch.float32)
         spa_src, spa_dst, spa_wts = _build_spatial_graph(coords, r=r_spatial)
         edge_index, mol_weight, spatial_weight = _build_union_edges(mol_src, mol_dst, mol_wts, spa_src, spa_dst, spa_wts, n_cells)

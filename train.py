@@ -47,7 +47,15 @@ def load_real_data(dataset_name, n_hvg=2000, max_cells=None):
         if 'counts' in adata.layers:
             hvg_kwargs['flavor'] = 'seurat_v3'
             hvg_kwargs['layer'] = 'counts'
-        sc.pp.highly_variable_genes(adata, **hvg_kwargs)
+        try:
+            sc.pp.highly_variable_genes(adata, **hvg_kwargs)
+        except Exception as e:
+            err = str(e).lower()
+            if any(k in err for k in ['skmisc', 'loess', 'numpy.dtype size changed']):
+                print(f"  [warn] seurat_v3 unavailable, falling back to cell_ranger")
+                sc.pp.highly_variable_genes(adata, n_top_genes=min(n_hvg, adata.n_vars), flavor='cell_ranger')
+            else:
+                raise
     adata = adata[:, adata.var['highly_variable']].copy()
     if 'X_pca' not in adata.obsm:
         n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)
