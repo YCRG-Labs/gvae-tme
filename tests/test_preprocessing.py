@@ -610,3 +610,91 @@ class TestHVGFallback:
         source = inspect.getsource(download_colorectal)
         assert "tar" in source and "xf" in source, "download_colorectal must extract the tar"
         assert "extracted" in source, "download_colorectal must track extraction state"
+
+
+class TestValidator:
+
+    def test_valid_synthetic_passes(self, tmp_path):
+        adata = _make_adata(n_cells=200, n_genes=200, n_patients=6, has_spatial=True)
+        path = tmp_path / "test.h5ad"
+        adata.write(path)
+
+        import importlib
+        sys.path.insert(0, str(Path(__file__).parent.parent / "data"))
+        import validate_processed as vp
+        importlib.reload(vp)
+
+        old_dir = vp.PROCESSED_DIR
+        vp.PROCESSED_DIR = tmp_path
+        try:
+            result = vp.validate("test", {
+                "min_cells": 50, "min_genes": 50,
+                "needs_response": True, "needs_spatial": True,
+            })
+            assert result is True
+        finally:
+            vp.PROCESSED_DIR = old_dir
+
+    def test_missing_pca_fails(self, tmp_path):
+        adata = _make_adata(n_cells=100, n_patients=4)
+        del adata.obsm["X_pca"]
+        path = tmp_path / "bad.h5ad"
+        adata.write(path)
+
+        import importlib
+        sys.path.insert(0, str(Path(__file__).parent.parent / "data"))
+        import validate_processed as vp
+        importlib.reload(vp)
+
+        old_dir = vp.PROCESSED_DIR
+        vp.PROCESSED_DIR = tmp_path
+        try:
+            result = vp.validate("bad", {
+                "min_cells": 10, "min_genes": 10,
+                "needs_response": True, "needs_spatial": False,
+            })
+            assert result is False
+        finally:
+            vp.PROCESSED_DIR = old_dir
+
+    def test_missing_file_skips(self, tmp_path):
+        import importlib
+        sys.path.insert(0, str(Path(__file__).parent.parent / "data"))
+        import validate_processed as vp
+        importlib.reload(vp)
+
+        old_dir = vp.PROCESSED_DIR
+        vp.PROCESSED_DIR = tmp_path
+        try:
+            result = vp.validate("nonexistent", {
+                "min_cells": 10, "min_genes": 10,
+                "needs_response": False, "needs_spatial": False,
+            })
+            assert result is None
+        finally:
+            vp.PROCESSED_DIR = old_dir
+
+    def test_mixed_response_fails(self, tmp_path):
+        adata = _make_adata(n_cells=100, n_patients=4)
+        mask = adata.obs["patient_id"] == "P000"
+        vals = adata.obs.loc[mask, "response"].values
+        if len(vals) > 1:
+            adata.obs.loc[adata.obs[mask].index[0], "response"] = 1 - vals[0]
+        path = tmp_path / "mixed.h5ad"
+        adata.write(path)
+
+        import importlib
+        sys.path.insert(0, str(Path(__file__).parent.parent / "data"))
+        import validate_processed as vp
+        importlib.reload(vp)
+
+        old_dir = vp.PROCESSED_DIR
+        vp.PROCESSED_DIR = tmp_path
+        try:
+            result = vp.validate("mixed", {
+                "min_cells": 10, "min_genes": 10,
+                "needs_response": True, "needs_spatial": False,
+            })
+            assert result is False
+        finally:
+            vp.PROCESSED_DIR = old_dir

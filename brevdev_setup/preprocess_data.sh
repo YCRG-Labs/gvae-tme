@@ -86,6 +86,10 @@ for F in data/processed/*.h5ad; do
     fi
 done
 
+echo ""
+echo "=== Validating processed datasets ==="
+python3 data/validate_processed.py || FAILED="$FAILED validation"
+
 if [ -n "$FAILED" ]; then
     echo ""
     echo "WARNING: Failed preprocessing:$FAILED"
