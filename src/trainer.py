@@ -273,14 +273,13 @@ class Trainer:
             self.model.gate.requires_grad_(False)
         self.gamma = self.gamma_phase2
         self.setup_optimizer(phase=2)
-        best_val_loss = float('inf')
+        best_val_pred = float('inf')
         patience_counter = 0
         gamma_reductions = 0
         for epoch in range(1, self.epochs_phase2 + 1):
             losses = self.train_epoch(data, phase=2, epoch=epoch)
             if epoch % 10 == 0:
                 val = self.evaluate(data)
-                val_loss = val['loss_adj'] + val['loss_expr']
                 adj_degraded = val['loss_adj'] > self.tolerance * self.phase1_metrics['loss_adj']
                 expr_degraded = val['loss_expr'] > self.tolerance * self.phase1_metrics['loss_expr']
                 if adj_degraded or expr_degraded:
@@ -293,8 +292,8 @@ class Trainer:
                         break
                 val_pred = self.evaluate_prediction(data)
                 print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} L_pred={losses['pred']:.4f} val_pred={val_pred:.4f} gamma={self.gamma:.4f}")
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if val_pred < best_val_pred:
+                    best_val_pred = val_pred
                     patience_counter = 0
                     self._best_state_p2 = {k: v.clone() for k, v in self.model.state_dict().items()}
                 else:

@@ -233,19 +233,20 @@ class MiniBatchTrainer(Trainer):
         self.gamma = self.gamma_phase2
         self.setup_optimizer(phase=2)
         self._pred_optimizer = None
-        best_val_loss = float('inf')
+        best_val_pred = float('inf')
         patience_counter = 0
         gamma_reductions = 0
+        n_pred_steps = 5
         has_predictor = self.model.use_predictor and hasattr(data, 'patient_masks')
         for epoch in range(1, self.epochs_phase2 + 1):
             losses = self.train_epoch(data, phase=2, epoch=epoch)
             pred_loss = 0.0
             if has_predictor:
-                pred_loss = self._train_predictor_step(data)
+                for _ in range(n_pred_steps):
+                    pred_loss = self._train_predictor_step(data)
                 losses['pred'] = pred_loss
             if epoch % 10 == 0:
                 val = self.evaluate(data)
-                val_loss = val['loss_adj'] + val['loss_expr']
                 adj_degraded = val['loss_adj'] > self.tolerance * self.phase1_metrics['loss_adj']
                 expr_degraded = val['loss_expr'] > self.tolerance * self.phase1_metrics['loss_expr']
                 if adj_degraded or expr_degraded:
@@ -259,8 +260,8 @@ class MiniBatchTrainer(Trainer):
                 val_pred = self.evaluate_prediction(data) if has_predictor else 0.0
                 print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} "
                       f"L_pred={losses['pred']:.4f} val_pred={val_pred:.4f} gamma={self.gamma:.4f}")
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
+                if val_pred < best_val_pred:
+                    best_val_pred = val_pred
                     patience_counter = 0
                     self._best_state_p2 = {k: v.clone() for k, v in self.model.state_dict().items()}
                 else:

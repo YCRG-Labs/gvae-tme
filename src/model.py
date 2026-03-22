@@ -153,10 +153,18 @@ class AttentionPooling(nn.Module):
         return h_p, attn
 
 class ResponsePredictor(nn.Module):
-    def __init__(self, latent_dim):
+    def __init__(self, latent_dim, dropout=0.3):
         super().__init__()
         self.pooling = AttentionPooling(latent_dim)
-        self.classifier = nn.Linear(latent_dim, 1)
+        self.classifier = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(latent_dim, latent_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(latent_dim // 2, 1),
+        )
 
     def forward(self, z, patient_masks):
         preds, attns = [], []
