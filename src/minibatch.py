@@ -195,6 +195,7 @@ class MiniBatchTrainer(Trainer):
         self.setup_optimizer(phase=1)
         best_val_loss = float('inf')
         patience_counter = 0
+        es_start = self._final_cycle_start()
         for epoch in range(1, self.epochs_phase1 + 1):
             losses = self.train_epoch(data, phase=1, epoch=epoch)
             if epoch % 10 == 0:
@@ -202,15 +203,19 @@ class MiniBatchTrainer(Trainer):
                 val_loss = val['loss_adj'] + val['loss_expr']
                 print(f"Epoch {epoch:3d} | L_adj={losses['adj']:.4f} L_expr={losses['expr']:.4f} "
                       f"L_kl={losses['kl']:.4f} beta={losses['beta']:.5f} Val={val_loss:.4f}")
-                if val_loss < best_val_loss:
+                if epoch >= es_start:
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        patience_counter = 0
+                        self._best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+                    else:
+                        patience_counter += 1
+                    if patience_counter >= self.patience // 10:
+                        print(f"Early stopping at epoch {epoch}")
+                        break
+                elif val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    patience_counter = 0
                     self._best_state = {k: v.clone() for k, v in self.model.state_dict().items()}
-                else:
-                    patience_counter += 1
-                if patience_counter >= self.patience // 10:
-                    print(f"Early stopping at epoch {epoch}")
-                    break
             if epoch % self.checkpoint_every == 0:
                 self.save_checkpoint(f"phase1_epoch{epoch}")
         if hasattr(self, '_best_state'):
