@@ -13,4 +13,5 @@ seaborn>=0.13
 pytest>=8.0
 optuna>=3.5
 scrublet>=0.2
+celltypist>=1.6
 h5py>=3.10
