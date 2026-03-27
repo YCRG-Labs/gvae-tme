@@ -802,7 +802,7 @@ def _resolve_shared_genes(adata_source, adata_target, gene_set, n_hvg=2000):
 
 
 def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
-                            gene_set='pan_immune', min_shared=500):
+                            gene_set='pan_immune', min_shared=500, max_cells=None):
     """Cross-dataset transfer using a shared gene set instead of independent HVGs."""
     output_dir = Path(output_dir) / 'transfer_joint'
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -820,6 +820,9 @@ def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
     print(f"\nLoading raw datasets...")
     adata_source = anndata.read_h5ad(source_path)
     adata_target = anndata.read_h5ad(target_path)
+    if max_cells and adata_target.n_obs > max_cells:
+        sc.pp.subsample(adata_target, n_obs=max_cells, random_state=42)
+        print(f"  Target subsampled to {max_cells} cells")
     print(f"  Source ({source_dataset}): {adata_source.n_obs} cells, {adata_source.n_vars} genes")
     print(f"  Target ({target_dataset}): {adata_target.n_obs} cells, {adata_target.n_vars} genes")
 
@@ -1024,6 +1027,7 @@ def main():
         run_transfer_joint_hvg(
             args.source, args.target, output_dir, config,
             gene_set=args.gene_set, min_shared=args.min_shared,
+            max_cells=args.max_cells,
         )
         return
 
