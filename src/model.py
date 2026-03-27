@@ -97,8 +97,11 @@ class ZINBDecoder(nn.Module):
         self.log_theta = nn.Parameter(torch.zeros(n_genes))
 
     def forward(self, z, library_size, batch_ids=None):
-        if batch_ids is not None and self.n_batches > 0:
-            one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+        if self.n_batches > 0:
+            if batch_ids is not None:
+                one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+            else:
+                one_hot = torch.zeros(z.size(0), self.n_batches, device=z.device)
             z = torch.cat([z, one_hot], dim=1)
         h = self.backbone(z)
         rho = F.softmax(self.rho_head(h), dim=1) * library_size.unsqueeze(1)
@@ -122,8 +125,11 @@ class GaussianDecoder(nn.Module):
         self.logvar_head = nn.Linear(prev, n_genes)
 
     def forward(self, z, library_size, batch_ids=None):
-        if batch_ids is not None and self.n_batches > 0:
-            one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+        if self.n_batches > 0:
+            if batch_ids is not None:
+                one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+            else:
+                one_hot = torch.zeros(z.size(0), self.n_batches, device=z.device)
             z = torch.cat([z, one_hot], dim=1)
         h = self.backbone(z)
         mu = self.mu_head(h)
