@@ -83,10 +83,11 @@ class GCNEncoder(nn.Module):
 
 
 class ZINBDecoder(nn.Module):
-    def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2):
+    def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2, n_batches=0):
         super().__init__()
+        self.n_batches = n_batches
         layers = []
-        prev = latent_dim
+        prev = latent_dim + n_batches if n_batches > 0 else latent_dim
         for hd in hidden_dims:
             layers += [nn.Linear(prev, hd), nn.BatchNorm1d(hd), nn.ELU(), nn.Dropout(dropout)]
             prev = hd
@@ -95,7 +96,10 @@ class ZINBDecoder(nn.Module):
         self.pi_head = nn.Linear(prev, n_genes)
         self.log_theta = nn.Parameter(torch.zeros(n_genes))
 
-    def forward(self, z, library_size):
+    def forward(self, z, library_size, batch_ids=None):
+        if batch_ids is not None and self.n_batches > 0:
+            one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+            z = torch.cat([z, one_hot], dim=1)
         h = self.backbone(z)
         rho = F.softmax(self.rho_head(h), dim=1) * library_size.unsqueeze(1)
         theta = torch.exp(self.log_theta)
@@ -105,10 +109,11 @@ class ZINBDecoder(nn.Module):
 
 class GaussianDecoder(nn.Module):
 
-    def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2):
+    def __init__(self, latent_dim, hidden_dims=(128, 256), n_genes=2000, dropout=0.2, n_batches=0):
         super().__init__()
+        self.n_batches = n_batches
         layers = []
-        prev = latent_dim
+        prev = latent_dim + n_batches if n_batches > 0 else latent_dim
         for hd in hidden_dims:
             layers += [nn.Linear(prev, hd), nn.BatchNorm1d(hd), nn.ELU(), nn.Dropout(dropout)]
             prev = hd
@@ -116,7 +121,10 @@ class GaussianDecoder(nn.Module):
         self.mu_head = nn.Linear(prev, n_genes)
         self.logvar_head = nn.Linear(prev, n_genes)
 
-    def forward(self, z, library_size):
+    def forward(self, z, library_size, batch_ids=None):
+        if batch_ids is not None and self.n_batches > 0:
+            one_hot = F.one_hot(batch_ids, num_classes=self.n_batches).float()
+            z = torch.cat([z, one_hot], dim=1)
         h = self.backbone(z)
         mu = self.mu_head(h)
         logvar = self.logvar_head(h)
@@ -179,11 +187,12 @@ class GVAEModel(nn.Module):
     def __init__(self, n_features, n_genes, hidden_dim=64, latent_dim=32, n_heads=4,
                  dropout=0.2, n_neg_samples=5, use_predictor=False,
                  encoder_type='gat', decoder_type='zinb', gate_mode='learned',
-                 spatial_bias=0.0):
+                 spatial_bias=0.0, n_batches=0):
         super().__init__()
         self.gate_mode = gate_mode
         self.encoder_type = encoder_type
         self.decoder_type = decoder_type
+        self.n_batches = n_batches
 
         self.gate = CellAdaptiveGate(n_features, spatial_bias=spatial_bias)
 
@@ -194,9 +203,9 @@ class GVAEModel(nn.Module):
 
         self.adj_decoder = AdjacencyDecoder(n_neg_samples)
         if decoder_type == 'gaussian':
-            self.expr_decoder = GaussianDecoder(latent_dim, n_genes=n_genes, dropout=dropout)
+            self.expr_decoder = GaussianDecoder(latent_dim, n_genes=n_genes, dropout=dropout, n_batches=n_batches)
         else:
-            self.expr_decoder = ZINBDecoder(latent_dim, n_genes=n_genes, dropout=dropout)
+            self.expr_decoder = ZINBDecoder(latent_dim, n_genes=n_genes, dropout=dropout, n_batches=n_batches)
 
         self.use_predictor = use_predictor
         if use_predictor:
@@ -236,7 +245,8 @@ class GVAEModel(nn.Module):
         z = self.reparameterize(mu, logvar)
         pos_scores, neg_scores = self.adj_decoder(z, edge_index, x.size(0))
         lib = data.library_size if hasattr(data, 'library_size') else x.sum(dim=1)
-        expr_out = self.expr_decoder(z, lib)
+        batch_ids = getattr(data, 'batch_ids', None) if self.n_batches > 0 else None
+        expr_out = self.expr_decoder(z, lib, batch_ids=batch_ids)
         attn_weights = None
         if self.encoder_type == 'gat' and hasattr(self.encoder, 'gat1'):
             attn_weights = self.encoder.gat1._alpha

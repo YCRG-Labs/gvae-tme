@@ -68,6 +68,71 @@ class RareCellDetector:
         labels[is_rare] = adata.obs['leiden'].astype(int).values + 100
         return labels
 
+class RareCellValidator:
+    """Validate KL-rare cells against CellTypist annotations."""
+
+    IMMUNOSUPPRESSIVE_TYPES = {
+        'Treg': ['Treg', 'regulatory T', 'CD4+ Treg'],
+        'M2_macrophage': ['M2', 'macrophage', 'TAM', 'Macro_'],
+        'MDSC': ['MDSC', 'monocyte', 'Mono_'],
+        'Exhausted_T': ['exhausted', 'Tex', 'CD8+ exhausted'],
+    }
+
+    @staticmethod
+    def annotate_celltypist(adata, model_name='Immune_All_Low.pkl'):
+        try:
+            import celltypist
+            model = celltypist.models.download_model(model_name)
+            predictions = celltypist.annotate(adata, model=model_name, majority_voting=True)
+            return predictions.predicted_labels['majority_voting'].values
+        except Exception as e:
+            print(f"  [warn] CellTypist failed: {e}")
+            return None
+
+    @classmethod
+    def validate_rare_overlap(cls, adata, is_rare, cell_type_labels=None):
+        if cell_type_labels is None:
+            cell_type_labels = cls.annotate_celltypist(adata)
+        if cell_type_labels is None:
+            return {'note': 'CellTypist annotation failed'}
+
+        results = {}
+        all_immuno_mask = np.zeros(len(is_rare), dtype=bool)
+
+        for sig_name, keywords in cls.IMMUNOSUPPRESSIVE_TYPES.items():
+            is_type = np.array([
+                any(kw.lower() in str(ct).lower() for kw in keywords)
+                for ct in cell_type_labels
+            ])
+            n_type = is_type.sum()
+            if n_type == 0:
+                results[sig_name] = {'n_annotated': 0, 'precision': np.nan, 'recall': np.nan}
+                continue
+
+            n_rare_and_type = (is_rare & is_type).sum()
+            precision = n_rare_and_type / max(is_rare.sum(), 1)
+            recall = n_rare_and_type / n_type
+
+            all_immuno_mask |= is_type
+            results[sig_name] = {
+                'n_annotated': int(n_type),
+                'n_rare_and_type': int(n_rare_and_type),
+                'precision': float(precision),
+                'recall': float(recall),
+            }
+
+        n_immuno = all_immuno_mask.sum()
+        n_rare_immuno = (is_rare & all_immuno_mask).sum()
+        results['overall'] = {
+            'n_immunosuppressive': int(n_immuno),
+            'n_rare_immunosuppressive': int(n_rare_immuno),
+            'precision': float(n_rare_immuno / max(is_rare.sum(), 1)),
+            'recall': float(n_rare_immuno / max(n_immuno, 1)),
+        }
+        results['cell_type_labels'] = cell_type_labels.tolist() if hasattr(cell_type_labels, 'tolist') else list(cell_type_labels)
+
+        return results
+
 class ClusteringAnalyzer:
     def __init__(self, resolutions=(0.5, 1.0, 1.5, 2.0)):
         self.resolutions = resolutions

@@ -14,11 +14,12 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 from src.model import GVAEModel
 from src.trainer import Trainer
-from src.analysis import (RareCellDetector, ClusteringAnalyzer, PredictionAnalyzer,
-                          BatchMixingAnalyzer, ClinicalAssociationTest,
-                          BiologicalValidation, CrossDatasetAnalyzer,
-                          LigandReceptorAnalyzer, AttentionAnalyzer,
-                          Cell2LocationWrapper, CellTypeAnnotator)
+from src.analysis import (RareCellDetector, RareCellValidator, ClusteringAnalyzer,
+                          PredictionAnalyzer, BatchMixingAnalyzer,
+                          ClinicalAssociationTest, BiologicalValidation,
+                          CrossDatasetAnalyzer, LigandReceptorAnalyzer,
+                          AttentionAnalyzer, Cell2LocationWrapper,
+                          CellTypeAnnotator)
 from src.data_utils import prepare_graph_data, create_synthetic_data, SplatterSimulator
 from src.config import CONFIGS
 from src.ablations import ABLATION_REGISTRY, apply_ablation, LogisticRegressionBaseline
@@ -77,6 +78,7 @@ def make_serializable(obj):
     return obj
 
 def build_model(config, data, use_predictor):
+    n_batches = int(data.batch_ids.max().item()) + 1 if hasattr(data, 'batch_ids') else 0
     return GVAEModel(
         n_features=data.x.size(1),
         n_genes=data.x_raw.size(1),
@@ -90,6 +92,7 @@ def build_model(config, data, use_predictor):
         decoder_type=config.get('decoder_type', 'zinb'),
         gate_mode=config.get('gate_mode', 'learned'),
         spatial_bias=config.get('spatial_bias', 0.0),
+        n_batches=n_batches,
     )
 
 def make_trainer(model, config, device, output_dir, freeze_encoder=False, data=None):
@@ -254,6 +257,17 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     except Exception as e:
         print(f"  [warn] Rare subcluster validation: {e}")
 
+    rare_validation_results = {}
+    try:
+        rare_validation_results = RareCellValidator.validate_rare_overlap(adata, is_rare)
+        if isinstance(rare_validation_results, dict) and 'overall' in rare_validation_results:
+            ov = rare_validation_results['overall']
+            print(f"Rare-cell validation: {ov['n_rare_immunosuppressive']}/{ov['n_immunosuppressive']} "
+                  f"immunosuppressive cells flagged as rare "
+                  f"(precision={ov['precision']:.3f}, recall={ov['recall']:.3f})")
+    except Exception as e:
+        print(f"  [warn] Rare cell CellTypist validation: {e}")
+
     batch_metrics = {}
     if 'patient_id' in adata.obs.columns:
         batch_labels = adata.obs['patient_id'].values
@@ -377,7 +391,8 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
                        'method': rare_method,
                        'rare_markers': rare_marker_results,
                        'rare_gsea': rare_gsea_results,
-                       'immunosuppressive_signatures': signature_results},
+                       'immunosuppressive_signatures': signature_results,
+                       'celltypist_validation': rare_validation_results},
         'spatial_validation': spatial_metrics,
         'gate': {'mean': float(gate_vals.mean()), 'std': float(gate_vals.std())},
         'logreg_baseline': logreg_results,
@@ -688,6 +703,272 @@ def run_cv(args, config, n_outer=5, n_permutations=1000):
         json.dump(make_serializable(results), f, indent=2)
     print(f"\nResults saved to {output_dir}/")
 
+PAN_IMMUNE_MARKERS = [
+    'CD3D', 'CD3E', 'CD4', 'CD8A', 'CD8B', 'FOXP3', 'IL2RA', 'CTLA4',
+    'PDCD1', 'LAG3', 'HAVCR2', 'TIGIT', 'TOX', 'GZMB', 'PRF1', 'IFNG',
+    'TNF', 'IL2', 'ICOS', 'CD28', 'CD69', 'CD44', 'SELL',
+    'CD19', 'MS4A1', 'CD79A', 'CD79B', 'PAX5', 'IGHG1',
+    'NKG7', 'GNLY', 'KLRD1', 'KLRB1', 'NCR1',
+    'CD14', 'CD68', 'CD163', 'MRC1', 'MSR1', 'MARCO', 'CD209',
+    'S100A8', 'S100A9', 'S100A12', 'FCN1', 'VCAN', 'LYZ',
+    'ITGAM', 'ITGAX', 'CSF1R', 'CD86', 'CD80', 'HLA-DRA',
+    'CLEC9A', 'XCR1', 'BATF3', 'CD1C', 'FCER1A', 'LAMP3',
+    'CXCL9', 'CXCL10', 'CXCL13', 'CCL5', 'CCL19', 'CCL21',
+    'CXCR3', 'CXCR5', 'CCR7', 'CCR5',
+    'CD274', 'PDCD1LG2', 'TNFRSF9', 'TNFRSF18', 'FASLG', 'FAS',
+    'PECAM1', 'VWF', 'VEGFA', 'FLT1', 'KDR', 'COL1A1', 'FAP', 'ACTA2',
+    'EPCAM', 'KRT8', 'KRT18', 'MKI67', 'TOP2A',
+    'SPP1', 'TGFB1', 'IL10', 'IL10RA', 'ARG1', 'IDO1',
+    'HLA-A', 'HLA-B', 'HLA-C', 'B2M', 'IKZF2',
+    'KIR2DL1', 'KIR3DL1', 'TNFRSF1A', 'IFNGR1',
+]
+
+
+def _get_celltypist_markers():
+    try:
+        import celltypist
+        model = celltypist.models.Model.load(model='Immune_All_Low.pkl')
+        genes = list(model.classifier.features)
+        if len(genes) > 100:
+            return genes
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_shared_genes(adata_source, adata_target, gene_set, n_hvg=2000):
+    source_genes = set(adata_source.var_names)
+    target_genes = set(adata_target.var_names)
+    common_universe = source_genes & target_genes
+
+    if gene_set == 'pan_immune':
+        celltypist_genes = _get_celltypist_markers()
+        if celltypist_genes is not None:
+            candidates = celltypist_genes
+            print(f"  Using CellTypist Immune_All markers: {len(candidates)} genes")
+        else:
+            candidates = PAN_IMMUNE_MARKERS
+            print(f"  CellTypist unavailable, using curated pan-immune list: {len(candidates)} genes")
+        shared = sorted(common_universe & set(candidates))
+
+    elif gene_set == 'union':
+        src_tmp = adata_source.copy()
+        tgt_tmp = adata_target.copy()
+        hvg_kwargs = {'n_top_genes': min(n_hvg, src_tmp.n_vars)}
+        if 'counts' in src_tmp.layers:
+            hvg_kwargs.update({'flavor': 'seurat_v3', 'layer': 'counts'})
+        try:
+            sc.pp.highly_variable_genes(src_tmp, **hvg_kwargs)
+        except Exception:
+            sc.pp.highly_variable_genes(src_tmp, n_top_genes=min(n_hvg, src_tmp.n_vars), flavor='cell_ranger')
+        hvg_kwargs_t = {'n_top_genes': min(n_hvg, tgt_tmp.n_vars)}
+        if 'counts' in tgt_tmp.layers:
+            hvg_kwargs_t.update({'flavor': 'seurat_v3', 'layer': 'counts'})
+        try:
+            sc.pp.highly_variable_genes(tgt_tmp, **hvg_kwargs_t)
+        except Exception:
+            sc.pp.highly_variable_genes(tgt_tmp, n_top_genes=min(n_hvg, tgt_tmp.n_vars), flavor='cell_ranger')
+        src_hvgs = set(src_tmp.var_names[src_tmp.var['highly_variable']])
+        tgt_hvgs = set(tgt_tmp.var_names[tgt_tmp.var['highly_variable']])
+        shared = sorted((src_hvgs | tgt_hvgs) & common_universe)
+        print(f"  Union HVGs: {len(src_hvgs)} + {len(tgt_hvgs)} -> {len(shared)} shared")
+
+    elif gene_set == 'intersection':
+        src_tmp = adata_source.copy()
+        tgt_tmp = adata_target.copy()
+        hvg_kwargs = {'n_top_genes': min(n_hvg, src_tmp.n_vars)}
+        if 'counts' in src_tmp.layers:
+            hvg_kwargs.update({'flavor': 'seurat_v3', 'layer': 'counts'})
+        try:
+            sc.pp.highly_variable_genes(src_tmp, **hvg_kwargs)
+        except Exception:
+            sc.pp.highly_variable_genes(src_tmp, n_top_genes=min(n_hvg, src_tmp.n_vars), flavor='cell_ranger')
+        hvg_kwargs_t = {'n_top_genes': min(n_hvg, tgt_tmp.n_vars)}
+        if 'counts' in tgt_tmp.layers:
+            hvg_kwargs_t.update({'flavor': 'seurat_v3', 'layer': 'counts'})
+        try:
+            sc.pp.highly_variable_genes(tgt_tmp, **hvg_kwargs_t)
+        except Exception:
+            sc.pp.highly_variable_genes(tgt_tmp, n_top_genes=min(n_hvg, tgt_tmp.n_vars), flavor='cell_ranger')
+        src_hvgs = set(src_tmp.var_names[src_tmp.var['highly_variable']])
+        tgt_hvgs = set(tgt_tmp.var_names[tgt_tmp.var['highly_variable']])
+        shared = sorted(src_hvgs & tgt_hvgs & common_universe)
+        print(f"  Intersection HVGs: {len(src_hvgs)} & {len(tgt_hvgs)} -> {len(shared)} shared")
+
+    else:
+        raise ValueError(f"Unknown gene_set: {gene_set}")
+
+    return shared
+
+
+def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
+                            gene_set='pan_immune', min_shared=500):
+    """Cross-dataset transfer using a shared gene set instead of independent HVGs."""
+    output_dir = Path(output_dir) / 'transfer_joint'
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n{'='*60}")
+    print(f"Joint HVG Transfer: {source_dataset} -> {target_dataset}")
+    print(f"Gene set strategy: {gene_set}")
+    print(f"{'='*60}")
+
+    source_info = DATASETS[source_dataset]
+    target_info = DATASETS[target_dataset]
+    source_path = Path(__file__).parent / source_info['path']
+    target_path = Path(__file__).parent / target_info['path']
+
+    print(f"\nLoading raw datasets...")
+    adata_source = anndata.read_h5ad(source_path)
+    adata_target = anndata.read_h5ad(target_path)
+    print(f"  Source ({source_dataset}): {adata_source.n_obs} cells, {adata_source.n_vars} genes")
+    print(f"  Target ({target_dataset}): {adata_target.n_obs} cells, {adata_target.n_vars} genes")
+
+    print(f"\nResolving shared gene space (strategy={gene_set})...")
+    shared_genes = _resolve_shared_genes(adata_source, adata_target, gene_set)
+    print(f"  Shared genes: {len(shared_genes)}")
+
+    if len(shared_genes) < min_shared:
+        raise ValueError(
+            f"Only {len(shared_genes)} shared genes found (min_shared={min_shared}). "
+            f"Try gene_set='union' for broader coverage."
+        )
+
+    adata_source = adata_source[:, shared_genes].copy()
+    adata_target = adata_target[:, shared_genes].copy()
+    print(f"  Source after subset: {adata_source.n_obs} cells, {adata_source.n_vars} genes")
+    print(f"  Target after subset: {adata_target.n_obs} cells, {adata_target.n_vars} genes")
+
+    n_comps = min(50, adata_source.n_obs - 1, adata_source.n_vars - 1)
+    sc.pp.pca(adata_source, n_comps=n_comps)
+    n_comps_t = min(50, adata_target.n_obs - 1, adata_target.n_vars - 1)
+    sc.pp.pca(adata_target, n_comps=n_comps_t)
+    print(f"  Source PCA: {adata_source.obsm['X_pca'].shape}")
+    print(f"  Target PCA: {adata_target.obsm['X_pca'].shape}")
+
+    source_has_spatial = source_info.get('has_spatial', False)
+    source_graph_kwargs = {'r_spatial': source_info.get('r_spatial', 82.5)}
+    print(f"\nBuilding source graph...")
+    data_source = prepare_graph_data(adata_source, has_spatial=source_has_spatial, **source_graph_kwargs)
+    print(f"  {data_source.edge_index.size(1)} edges")
+
+    has_response = hasattr(data_source, 'y') and data_source.y is not None
+    model = build_model(config, data_source, has_response)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nTraining GVAE on source ({source_dataset})...")
+    print(f"  Model: {total_params:,} parameters")
+
+    if adata_source.n_obs > 50_000 and config.get('batch_size') is None:
+        config['batch_size'] = 512
+
+    trainer = make_trainer(model, config, config['device'], output_dir, data=data_source)
+    source_metrics = trainer.train(data_source)
+    torch.save(model.state_dict(), output_dir / 'source_model.pt')
+
+    target_has_spatial = target_info.get('has_spatial', False)
+    target_graph_kwargs = {'r_spatial': target_info.get('r_spatial', 82.5)}
+    print(f"\nBuilding target graph...")
+    data_target = prepare_graph_data(adata_target, has_spatial=target_has_spatial, **target_graph_kwargs)
+    print(f"  {data_target.edge_index.size(1)} edges")
+
+    print(f"\nApplying frozen encoder to target ({target_dataset})...")
+    model.eval()
+    device = config['device']
+    with torch.no_grad():
+        outputs_target = _chunked_inference(model, data_target, device)
+        z_target = outputs_target['z'].numpy()
+        mu_target = outputs_target['mu'].numpy()
+        logvar_target = outputs_target['logvar'].numpy()
+        gate_target = outputs_target['gate_values'].numpy()
+
+    print(f"\n=== Evaluating on target ({target_dataset}) ===")
+
+    clusterer = ClusteringAnalyzer()
+    best_res, best_sil = clusterer.select_resolution(z_target, logvar=logvar_target)
+    labels, confidence = clusterer.cluster(z_target, logvar=logvar_target, resolution=best_res)
+    cluster_metrics = clusterer.evaluate(z_target, labels)
+    cluster_metrics['resolution'] = best_res
+    print(f"  Clusters: {cluster_metrics['n_clusters']}, "
+          f"Silhouette: {cluster_metrics['silhouette']:.4f}, Resolution: {best_res}")
+
+    detector = RareCellDetector(threshold=config.get('rare_threshold', 2.0))
+    scores, is_rare = detector.detect(mu_target, logvar_target)
+    rare_labels = np.full(len(z_target), -1, dtype=int)
+    if is_rare.sum() > 10:
+        rare_labels = detector.subcluster(z_target, is_rare, resolution=2.0)
+    print(f"  Rare cells: {is_rare.sum()} / {len(is_rare)}")
+
+    marker_results = {}
+    try:
+        marker_results = CrossDatasetAnalyzer.marker_genes(z_target, labels, adata_target)
+        n_clusters_with_markers = sum(1 for v in marker_results.values() if len(v) > 0)
+        print(f"  Marker genes: {n_clusters_with_markers} clusters with markers")
+    except Exception as e:
+        print(f"  [warn] Marker gene analysis: {e}")
+
+    marker_concordance = {}
+    try:
+        source_outputs = _chunked_inference(model, data_source, device)
+        z_source = source_outputs['z'].numpy()
+        source_labels, _ = clusterer.cluster(z_source, resolution=best_res)
+        source_markers = CrossDatasetAnalyzer.marker_genes(z_source, source_labels, adata_source)
+        all_source = set()
+        for genes in source_markers.values():
+            all_source.update(genes)
+        all_target = set()
+        for genes in marker_results.values():
+            all_target.update(genes)
+        if all_source and all_target:
+            overlap = all_source & all_target
+            jaccard = len(overlap) / len(all_source | all_target)
+            marker_concordance = {
+                'n_source_markers': len(all_source),
+                'n_target_markers': len(all_target),
+                'n_overlap': len(overlap),
+                'jaccard': jaccard,
+                'overlap_genes': sorted(overlap),
+            }
+            print(f"  Marker concordance: Jaccard={jaccard:.3f} "
+                  f"({len(overlap)} shared / {len(all_source | all_target)} total)")
+    except Exception as e:
+        print(f"  [warn] Marker concordance: {e}")
+
+    np.save(output_dir / 'target_embeddings.npy', z_target)
+    np.save(output_dir / 'target_cluster_labels.npy', labels)
+    np.save(output_dir / 'target_rare_scores.npy', scores)
+    np.save(output_dir / 'target_gate_values.npy', gate_target)
+    np.save(output_dir / 'target_confidence.npy', confidence)
+
+    adata_target.obsm['X_gvae'] = z_target
+    adata_target.obs['cluster'] = labels
+    adata_target.obs['rare_score'] = scores
+    adata_target.obs['confidence'] = confidence
+    adata_target.obs['gate'] = gate_target
+    adata_target.write(output_dir / 'target_adata_analysis.h5ad')
+
+    results = {
+        'source_dataset': source_dataset,
+        'target_dataset': target_dataset,
+        'gene_set': gene_set,
+        'n_shared_genes': len(shared_genes),
+        'shared_genes': shared_genes,
+        'source_n_cells': adata_source.n_obs,
+        'target_n_cells': adata_target.n_obs,
+        'source_training': source_metrics,
+        'target_clustering': cluster_metrics,
+        'target_rare_cells': {
+            'n_rare': int(is_rare.sum()),
+            'fraction': float(is_rare.mean()),
+        },
+        'target_markers': {k: v[:10] for k, v in marker_results.items()},
+        'marker_concordance': marker_concordance,
+        'config': {k: v for k, v in config.items() if isinstance(v, (int, float, str, bool, list))},
+    }
+    with open(output_dir / 'transfer_joint_results.json', 'w') as f:
+        json.dump(make_serializable(results), f, indent=2)
+    print(f"\nResults saved to {output_dir}/")
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', choices=['local', 'full'], default='local')
@@ -703,12 +984,46 @@ def main():
                         help='Mini-batch size (enables NeighborLoader training)')
     parser.add_argument('--inner-hp', action='store_true',
                         help='Enable inner HP selection in nested CV')
+    parser.add_argument('--mode', choices=['train', 'transfer_joint'], default='train',
+                        help='Run mode: train (default) or transfer_joint')
+    parser.add_argument('--source', choices=list(DATASETS.keys()), default=None,
+                        help='Source dataset for transfer_joint mode')
+    parser.add_argument('--target', choices=list(DATASETS.keys()), default=None,
+                        help='Target dataset for transfer_joint mode')
+    parser.add_argument('--gene-set', choices=['pan_immune', 'union', 'intersection'],
+                        default='pan_immune',
+                        help='Shared gene strategy for transfer_joint mode')
+    parser.add_argument('--min-shared', type=int, default=500,
+                        help='Minimum shared genes required for transfer_joint')
     args = parser.parse_args()
 
     config = CONFIGS[args.config].copy()
 
     if args.ablation:
         config = apply_ablation(config, args.ablation)
+
+    if args.mode == 'transfer_joint':
+        if args.source is None or args.target is None:
+            parser.error("--mode transfer_joint requires --source and --target")
+
+        if args.source in DATASETS:
+            dataset_overrides = {k: v for k, v in DATASETS[args.source].items()
+                                 if k in ('epochs_phase1', 'epochs_phase2')}
+            config.update(dataset_overrides)
+
+        if args.batch_size is not None:
+            config['batch_size'] = args.batch_size
+
+        print(f"Config: {args.config} | Device: {config['device']} | Mode: transfer_joint "
+              f"| Source: {args.source} | Target: {args.target} | Gene set: {args.gene_set}")
+
+        output_dir = Path('outputs') / f'{args.source}_to_{args.target}'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        run_transfer_joint_hvg(
+            args.source, args.target, output_dir, config,
+            gene_set=args.gene_set, min_shared=args.min_shared,
+        )
+        return
 
     if args.data in DATASETS:
         dataset_overrides = {k: v for k, v in DATASETS[args.data].items()

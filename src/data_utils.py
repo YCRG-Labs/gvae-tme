@@ -162,6 +162,12 @@ def prepare_graph_data(adata, spatial_key='spatial', k_mol=15, r_spatial=82.5, r
     library_size = torch.tensor(np.asarray(raw_X.sum(axis=1)).flatten(), dtype=torch.float32)
     x_raw = torch.tensor(raw_X.toarray() if hasattr(raw_X, 'toarray') else np.asarray(raw_X), dtype=torch.float32)
     data = Data(x=x, edge_index=edge_index, mol_weight=mol_weight, spatial_weight=spatial_weight, coords=coords_t, library_size=library_size, x_raw=x_raw, pos_pairs=pos_pairs, neg_pairs=neg_pairs, has_spatial_flag=has_spatial)
+    if 'patient_id' in adata.obs.columns:
+        pid_values = adata.obs['patient_id'].values
+        unique_pids_sorted = np.unique(pid_values)
+        pid_to_int = {pid: idx for idx, pid in enumerate(unique_pids_sorted)}
+        batch_ids_arr = np.array([pid_to_int[p] for p in pid_values], dtype=np.int64)
+        data.batch_ids = torch.tensor(batch_ids_arr, dtype=torch.long)
     if 'response' in adata.obs.columns and 'patient_id' in adata.obs.columns:
         patient_ids = adata.obs['patient_id'].values
         unique_pids = np.unique(patient_ids)
