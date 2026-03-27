@@ -873,9 +873,39 @@ def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
     data_target = prepare_graph_data(adata_target, has_spatial=target_has_spatial, **target_graph_kwargs)
     print(f"  {data_target.edge_index.size(1)} edges")
 
-    print(f"\nApplying frozen encoder to target ({target_dataset})...")
     if hasattr(data_target, 'batch_ids'):
         del data_target.batch_ids
+
+    print(f"\nFine-tuning encoder on target ({target_dataset})...")
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+    finetune_layers = ['encoder.gat_mu', 'encoder.gat_logvar', 'encoder.conv_mu', 'encoder.conv_logvar', 'gate']
+    n_unfrozen = 0
+    for name, param in model.named_parameters():
+        if any(fl in name for fl in finetune_layers):
+            param.requires_grad = True
+            n_unfrozen += 1
+    print(f"  Unfrozen {n_unfrozen} parameter groups (variational heads + gate)")
+
+    ft_config = dict(config)
+    ft_config['epochs_phase1'] = 50
+    ft_config['patience'] = 20
+    ft_config['lr'] = 1e-4
+    ft_config['batch_size'] = 512 if adata_target.n_obs > 50_000 else None
+    model.use_predictor = False
+    ft_trainer = make_trainer(model, ft_config, ft_config['device'], output_dir, data=data_target)
+    ft_trainer.gamma = 0.0
+    data_target_dev = data_target.to(ft_config['device'])
+    ft_metrics = ft_trainer.train_phase1(data_target_dev)
+    print(f"  Fine-tune complete: L_adj={ft_metrics.get('loss_adj', 0):.4f}, L_expr={ft_metrics.get('loss_expr', 0):.4f}")
+    data_target_dev = data_target_dev.to('cpu')
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    torch.save(model.state_dict(), output_dir / 'finetuned_model.pt')
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    print(f"\nExtracting target embeddings...")
     model.eval()
     device = config['device']
     with torch.no_grad():
