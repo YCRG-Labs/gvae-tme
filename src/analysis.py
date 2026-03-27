@@ -82,8 +82,14 @@ class RareCellValidator:
     def annotate_celltypist(adata, model_name='Immune_All_Low.pkl'):
         try:
             import celltypist
-            model = celltypist.models.download_model(model_name)
-            predictions = celltypist.annotate(adata, model=model_name, majority_voting=True)
+            celltypist.models.download_models(force_update=False, model=model_name)
+            model = celltypist.models.Model.load(model=model_name)
+            adata_ct = adata.copy()
+            if 'counts' in adata_ct.layers:
+                adata_ct.X = adata_ct.layers['counts'].copy()
+            sc.pp.normalize_total(adata_ct, target_sum=1e4)
+            sc.pp.log1p(adata_ct)
+            predictions = celltypist.annotate(adata_ct, model=model, majority_voting=True)
             return predictions.predicted_labels['majority_voting'].values
         except Exception as e:
             print(f"  [warn] CellTypist failed: {e}")
@@ -916,7 +922,12 @@ class CellTypeAnnotator:
 
         celltypist.models.download_models(force_update=False, model=model_name)
         model = celltypist.models.Model.load(model=model_name)
-        predictions = celltypist.annotate(adata, model=model, majority_voting=True)
+        adata_ct = adata.copy()
+        if 'counts' in adata_ct.layers:
+            adata_ct.X = adata_ct.layers['counts'].copy()
+        sc.pp.normalize_total(adata_ct, target_sum=1e4)
+        sc.pp.log1p(adata_ct)
+        predictions = celltypist.annotate(adata_ct, model=model, majority_voting=True)
         adata.obs['cell_type'] = predictions.predicted_labels['majority_voting']
 
         type_counts = adata.obs['cell_type'].value_counts().to_dict()
