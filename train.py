@@ -871,6 +871,8 @@ def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
     print(f"  {data_target.edge_index.size(1)} edges")
 
     print(f"\nApplying frozen encoder to target ({target_dataset})...")
+    if hasattr(data_target, 'batch_ids'):
+        del data_target.batch_ids
     model.eval()
     device = config['device']
     with torch.no_grad():
