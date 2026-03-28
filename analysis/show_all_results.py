@@ -265,9 +265,9 @@ for transfer_dir in sorted(OUTDIR.glob("*_to_*")):
               f"{mc.get('n_source_markers',0)+mc.get('n_target_markers',0)-mc.get('n_overlap',0)} total)")
         overlap = mc.get("overlap_genes", [])
         if overlap:
-            print(f"    Shared marker genes: {', '.join(overlap[:20])}")
-            if len(overlap) > 20:
-                print(f"                        ... and {len(overlap)-20} more")
+            for i in range(0, len(overlap), 10):
+                prefix = "    Shared marker genes: " if i == 0 else "                        "
+                print(f"{prefix}{', '.join(overlap[i:i+10])}")
 
 # ══════════════════════════════════════════════════════════════════════
 sep("SPIKE-IN VALIDATION (Rare Cell Recovery)")
