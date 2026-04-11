@@ -50,35 +50,86 @@ C = {
     'muted': '#56B4E9',
 }
 
-CV = {
-    'nsclc': dict(n=242, pooled=0.772, pooled_prc=0.772, mean=0.777, std=0.028,
-                  ci=[0.709, 0.826], perm_p=0.0, folds=[0.736, 0.753, 0.792, 0.811, 0.794]),
-    'melanoma': dict(n=32, pooled=0.700, pooled_prc=0.639, mean=0.825, std=0.113,
-                     ci=[0.504, 0.886], perm_p=0.026, folds=[1.0, 0.833, 0.667, 0.875, 0.75]),
-    'colorectal': dict(n=21, pooled=0.927, pooled_prc=0.949, mean=1.000, std=0.000,
-                       ci=[0.778, 1.000], perm_p=0.0, folds=[1.0, 1.0, 1.0, 1.0, 1.0]),
-}
+def _load_cv():
+    """Load cross-validation results from output JSON files."""
+    cv = {}
+    for key, path in [('nsclc', 'nsclc_ici_cv'), ('melanoma', 'melanoma_cv')]:
+        fp = OUTDIR / path / 'cv_results.json'
+        if fp.exists():
+            r = json.load(open(fp))
+            pm = r['pooled_metrics']
+            cm = r['cv_metrics']
+            bs = r.get('bootstrap_ci', {})
+            pt = r.get('permutation_test', {})
+            cv[key] = dict(
+                n=r.get('n_patients', 0),
+                pooled=pm['auroc'],
+                pooled_prc=pm.get('auprc', 0),
+                mean=cm['auroc']['mean'],
+                std=cm['auroc']['std'],
+                ci=bs.get('auroc_ci', [0, 0]),
+                perm_p=pt.get('p_value', 1.0),
+                folds=cm['auroc']['per_fold'],
+            )
+        else:
+            print(f'WARNING: {fp} not found')
+    return cv
 
-BENCH = {
-    'nsclc':    dict(gvae=(0.768, 0.044), scvi=(0.500, 0.000), scanpy=(0.792, 0.046)),
-    'melanoma': dict(gvae=(0.500, 0.000), scvi=(0.500, 0.000), scanpy=(0.783, 0.180)),
-}
 
-ABLATIONS = [
-    ('FULL',             0.700),
-    ('logreg\nbaseline', 0.750),
-    ('mol only',         0.500),
-    ('spatial only',     0.500),
-    ('static 0.3',       0.375),
-    ('static 0.5',       0.500),
-    ('static 0.7',       0.500),
-    ('no expr',          0.500),
-    ('gaussian',         0.500),
-    ('no contrast.',     0.500),
-    ('frozen enc.',      0.500),
-    ('GCN enc.',         0.125),
-    ('rare leiden',      0.500),
-]
+def _load_bench():
+    """Load benchmark results from output JSON files."""
+    bench = {}
+    for key, ds_key in [('nsclc', 'nsclc_ici'), ('melanoma', 'melanoma')]:
+        fp = OUTDIR / f'{ds_key}_benchmark_cv' / 'benchmark_cv_results.json'
+        if fp.exists():
+            r = json.load(open(fp))
+            cv = r.get('cv_results', r)
+            d = {}
+            for method in ['gvae', 'scvi', 'scanpy']:
+                m = cv.get(method, {})
+                d[method] = (m.get('auroc_mean', 0.5), m.get('auroc_std', 0.0))
+            bench[key] = d
+        else:
+            print(f'WARNING: {fp} not found')
+    return bench
+
+
+def _load_ablations():
+    """Load ablation AUROC values from output JSON files."""
+    ablations = []
+    # Baseline from CV
+    cv_path = OUTDIR / 'melanoma_cv' / 'cv_results.json'
+    if cv_path.exists():
+        r = json.load(open(cv_path))
+        ablations.append(('FULL', r['pooled_metrics']['auroc']))
+
+    abl_keys = [
+        ('logreg_baseline', 'logreg\nbaseline'),
+        ('mol_only',        'mol only'),
+        ('spatial_only',    'spatial only'),
+        ('static_0.3',      'static 0.3'),
+        ('static_0.5',      'static 0.5'),
+        ('static_0.7',      'static 0.7'),
+        ('no_expr',         'no expr'),
+        ('gaussian',        'gaussian'),
+        ('no_contrastive',  'no contrast.'),
+        ('frozen_encoder',  'frozen enc.'),
+        ('gcn_encoder',     'GCN enc.'),
+        ('rare_leiden',     'rare leiden'),
+    ]
+    for key, display_name in abl_keys:
+        fp = OUTDIR / f'melanoma_{key}' / 'metrics.json'
+        if fp.exists():
+            r = json.load(open(fp))
+            auroc = r.get('prediction', {}).get('auroc')
+            if auroc is not None:
+                ablations.append((display_name, float(auroc)))
+    return ablations
+
+
+CV = _load_cv()
+BENCH = _load_bench()
+ABLATIONS = _load_ablations()
 
 GATE_DATA = {
     'NSCLC\nscRNA': 1.000,
@@ -163,14 +214,12 @@ def figure2():
                            left=0.07, right=0.97, top=0.95, bottom=0.09)
 
     # ── Row 1: ROC curves ──
-    ax_a = fig.add_subplot(gs[0, :5])
-    ax_b = fig.add_subplot(gs[0, 5:9])
-    ax_c = fig.add_subplot(gs[0, 9:])
+    ax_a = fig.add_subplot(gs[0, :6])
+    ax_b = fig.add_subplot(gs[0, 6:])
 
     for ax, cohort, title_str, seed_off, show_bench in [
         (ax_a, 'nsclc',     'NSCLC ICI ($n$=242)',  0,  True),
         (ax_b, 'melanoma',  'Melanoma ($n$=32)',    10, False),
-        (ax_c, 'colorectal','Colorectal ($n$=21)',  20, False),
     ]:
         d = CV[cohort]
         fpr_g, tpr_g = synth_roc(d['pooled'], seed=42+seed_off)
@@ -222,7 +271,6 @@ def figure2():
     gvae_e2e = {
         'NSCLC\nICI':    CV['nsclc'],
         'Melanoma':      CV['melanoma'],
-        'Colorectal':    CV['colorectal'],
     }
     positions = np.arange(len(gvae_e2e))
     for i, (lbl, d) in enumerate(gvae_e2e.items()):
@@ -240,7 +288,7 @@ def figure2():
     ax_e.set_ylim(0.35, 1.08)
     ax_e.set_title('GVAE end-to-end', fontsize=7.5, pad=3)
 
-    for ax, l in [(ax_a,'a'), (ax_b,'b'), (ax_c,'c'), (ax_d,'d'), (ax_e,'e')]:
+    for ax, l in [(ax_a,'a'), (ax_b,'b'), (ax_d,'c'), (ax_e,'d')]:
         label(ax, l)
 
     save(fig, 'fig2_response_prediction')
