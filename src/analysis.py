@@ -416,18 +416,22 @@ class PredictionAnalyzer:
     @staticmethod
     def compute_metrics(y_true, y_pred):
         y_bin = (y_pred > 0.5).astype(int)
+        single_class = len(np.unique(y_true)) < 2
         try:
-            auroc = roc_auc_score(y_true, y_pred)
-            auprc = average_precision_score(y_true, y_pred)
+            auroc = float('nan') if single_class else float(roc_auc_score(y_true, y_pred))
+            auprc = float('nan') if single_class else float(average_precision_score(y_true, y_pred))
         except ValueError:
-            auroc = 0.5
-            auprc = 0.0
+            auroc = float('nan')
+            auprc = float('nan')
         tn = int(((y_bin == 0) & (y_true == 0)).sum())
         fp = int(((y_bin == 1) & (y_true == 0)).sum())
         specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else 0.0
         return {
             'auroc': auroc,
             'auprc': auprc,
+            'n_test': int(len(y_true)),
+            'n_pos_test': int(np.sum(y_true)),
+            'single_class_test': bool(single_class),
             'accuracy': accuracy_score(y_true, y_bin),
             'balanced_accuracy': balanced_accuracy_score(y_true, y_bin),
             'precision': precision_score(y_true, y_bin, zero_division=0),

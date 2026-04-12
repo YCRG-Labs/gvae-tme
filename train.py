@@ -285,14 +285,43 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
         y_pred_all = outputs['y_pred'].detach().cpu().numpy()
         if hasattr(data, 'test_patient_idx') and data.test_patient_idx.numel() > 0:
             test_idx = data.test_patient_idx.cpu().numpy()
-            pred_metrics = PredictionAnalyzer.compute_metrics(y_all[test_idx], y_pred_all[test_idx])
-            print(f"Test AUROC: {pred_metrics['auroc']:.3f}, AUPRC: {pred_metrics['auprc']:.3f} (n={len(test_idx)})")
+            pred_metrics = PredictionAnalyzer.compute_metrics(
+                y_all[test_idx], y_pred_all[test_idx])
+            auroc_display = (f"{pred_metrics['auroc']:.3f}"
+                             if not np.isnan(pred_metrics['auroc']) else "n/a (single-class test)")
+            print(f"Test AUROC [single-split, n={len(test_idx)}]: {auroc_display}")
 
+    # Stable CV-based prediction metric: always run LR on the frozen embeddings,
+    # using _choose_cv_splitter (LOO/RepeatedKFold/KFold). This sidesteps the
+    # small-n single-split problem. For small cohorts (n<50) this is the primary
+    # AUROC reported in metrics.json; the attention-pooling single-split value
+    # above is kept for reference as `prediction.single_split_auroc`.
     logreg_results = {}
-    if config.get('_prediction_method') == 'logreg' and hasattr(data, 'y'):
+    if hasattr(data, 'y'):
         y = data.y.cpu().numpy()
         logreg_results = LogisticRegressionBaseline.run(
             z, labels, data.patient_masks, y)
+        n_pat = len(y)
+        pooled = logreg_results.get('pooled_auroc', float('nan'))
+        if n_pat < 50:
+            # Promote the CV-based pooled AUROC to the primary prediction metric.
+            # Keep the single-split attention-pooling result alongside it.
+            pred_metrics = {
+                **pred_metrics,
+                'single_split_auroc': pred_metrics.get('auroc', float('nan')),
+                'single_split_auprc': pred_metrics.get('auprc', float('nan')),
+                'auroc': float(pooled),
+                'auprc': float(logreg_results.get('pooled_auprc', float('nan'))),
+                'cv_kind': logreg_results.get('cv'),
+                'n_splits': logreg_results.get('n_splits'),
+                'primary_method': 'logreg_cv_pooled',
+                'note': (f'n={n_pat}<50 → primary AUROC is pooled LR-on-embeddings '
+                         f'across {logreg_results.get("n_splits")} splits '
+                         f'({logreg_results.get("cv")}).'),
+            }
+            print(f"Primary AUROC [{logreg_results.get('cv')}, pooled]: {pooled:.3f}")
+        else:
+            pred_metrics.setdefault('primary_method', 'attention_pooling_single_split')
 
     clinical_results = {}
     if ('response' in adata.obs.columns and 'patient_id' in adata.obs.columns
