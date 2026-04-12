@@ -44,6 +44,41 @@ class RareCellDetector:
         return scores, is_rare
 
     @staticmethod
+    def detect_by_frequency(z, resolution=1.0, min_frequency=0.01):
+        """Leiden-cluster then flag clusters with < min_frequency share of cells as rare.
+
+        Matches the 1% threshold used by scCAD (Nat Comms 2024), GiniClust3, and the
+        Scanpy baseline in src/baselines.py. Returns per-cell rareness scores (inverse
+        cluster frequency) and a boolean is_rare mask.
+        """
+        n_cells = z.shape[0]
+        if n_cells < 5:
+            return np.zeros(n_cells), np.zeros(n_cells, dtype=bool)
+        if not _HAS_LEIDEN:
+            warnings.warn(
+                "leidenalg is not installed; detect_by_frequency cannot cluster. "
+                "Returning empty rare mask.",
+                RuntimeWarning,
+            )
+            return np.zeros(n_cells), np.zeros(n_cells, dtype=bool)
+
+        adata = anndata.AnnData(X=z)
+        adata.obsm['X_latent'] = z
+        n_neighbors = min(15, n_cells - 1)
+        sc.pp.neighbors(adata, use_rep='X_latent', n_neighbors=n_neighbors)
+        sc.tl.leiden(adata, resolution=resolution)
+        labels = adata.obs['leiden'].astype(int).values
+
+        unique, counts = np.unique(labels, return_counts=True)
+        freqs = counts / n_cells
+        rare_clusters = unique[freqs < min_frequency]
+        is_rare = np.isin(labels, rare_clusters)
+
+        cluster_freq = dict(zip(unique, freqs))
+        scores = np.array([1.0 / (cluster_freq[c] + 1e-8) for c in labels])
+        return scores, is_rare
+
+    @staticmethod
     def subcluster(z, is_rare, resolution=2.0):
         z_rare = z[is_rare]
         if z_rare.shape[0] < 5:

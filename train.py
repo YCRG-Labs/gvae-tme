@@ -181,10 +181,12 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     rare_method = config.get('_rare_method', 'kl')
     detector = RareCellDetector(threshold=config.get('rare_threshold', 2.0))
     if rare_method == 'leiden':
-        print("  [ablation] Using Leiden-only rare cell detection")
-        scores = np.zeros(len(z))
-        is_rare = np.ones(len(z), dtype=bool)  # all cells go through Leiden
-        rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
+        print("  [ablation] Using frequency-based rare detection (Leiden clusters < 1%)")
+        scores, is_rare = detector.detect_by_frequency(
+            z, resolution=1.0, min_frequency=0.01)
+        rare_labels = np.full(len(z), -1, dtype=int)
+        if is_rare.sum() > 10:
+            rare_labels = detector.subcluster(z, is_rare, resolution=2.0)
     else:
         scores, is_rare = detector.detect(mu, logvar)
         rare_labels = np.full(len(z), -1, dtype=int)
@@ -1006,7 +1008,7 @@ def run_transfer_joint_hvg(source_dataset, target_dataset, output_dir, config,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', choices=['local', 'full'], default='local')
+    parser.add_argument('--config', choices=['local', 'full', 'tuned_melanoma'], default='local')
     parser.add_argument('--data', choices=list(DATASETS.keys()) + ['synthetic'], default='synthetic')
     parser.add_argument('--max-cells', type=int, default=None)
     parser.add_argument('--n-hvg', type=int, default=2000)
