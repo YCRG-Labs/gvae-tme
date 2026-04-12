@@ -12,7 +12,7 @@ def section(title):
     print(f"{'='*70}")
 
 section("CROSS-VALIDATION (Response Prediction)")
-for name, path in [("Melanoma", "melanoma_cv"), ("NSCLC ICI", "nsclc_ici_cv")]:
+for name, path in [("Melanoma", "melanoma_cv"), ("NSCLC ICI", "nsclc_ici_cv"), ("Colorectal", "colorectal_cv")]:
     fp = os.path.join(RESULTS, path, "cv_results.json")
     try:
         r = json.load(open(fp))
@@ -250,7 +250,7 @@ for ds in ["nsclc_scrna", "breast", "nsclc_visium"]:
 section("PAPER FRAMING (data-driven)")
 # Read actual values for the summary
 cv_data = {}
-for name, path in [("nsclc", "nsclc_ici_cv"), ("melanoma", "melanoma_cv")]:
+for name, path in [("nsclc", "nsclc_ici_cv"), ("melanoma", "melanoma_cv"), ("colorectal", "colorectal_cv")]:
     fp = os.path.join(RESULTS, path, "cv_results.json")
     try:
         cv_data[name] = json.load(open(fp))
@@ -259,7 +259,7 @@ for name, path in [("nsclc", "nsclc_ici_cv"), ("melanoma", "melanoma_cv")]:
 
 print("\n  KEY RESULTS (from output files):\n")
 print("  1. RESPONSE PREDICTION")
-for name, label in [("nsclc", "NSCLC ICI"), ("melanoma", "Melanoma")]:
+for name, label in [("nsclc", "NSCLC ICI"), ("melanoma", "Melanoma"), ("colorectal", "Colorectal")]:
     if name in cv_data:
         r = cv_data[name]
         pm = r["pooled_metrics"]
