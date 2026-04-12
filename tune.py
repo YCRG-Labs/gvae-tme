@@ -6,8 +6,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import numpy as np
 import torch
-from sklearn.metrics import silhouette_score as sil_score
+from sklearn.metrics import silhouette_score as sil_score, roc_auc_score
 from sklearn.cluster import KMeans
+from sklearn.model_selection import StratifiedKFold
 
 try:
     import optuna
@@ -45,7 +46,65 @@ def build_trial_config(trial, base_config):
     return config
 
 
-def objective(trial, base_config, data, device, adata=None, has_spatial=True, graph_kwargs=None):
+def _auroc_objective(z_np, data, n_folds=5, seed=0):
+    """Patient-level AUROC via held-out fold on embeddings.
+
+    Mirrors LogisticRegressionBaseline.extract_features but computes a single
+    train/test split (fast) to score this Optuna trial. Returns NaN if labels
+    absent or only one class present.
+    """
+    if not hasattr(data, 'y') or data.y is None:
+        return float('nan')
+    if not hasattr(data, 'patient_masks'):
+        return float('nan')
+
+    y = data.y.cpu().numpy() if hasattr(data.y, 'cpu') else np.asarray(data.y)
+    if len(np.unique(y)) < 2:
+        return float('nan')
+
+    from sklearn.linear_model import LogisticRegression
+    masks = data.patient_masks
+    n_patients = len(y)
+
+    features = []
+    for mask in masks:
+        mask_np = mask.cpu().numpy() if hasattr(mask, 'cpu') else np.asarray(mask)
+        z_pat = z_np[mask_np]
+        if len(z_pat) == 0:
+            features.append(np.zeros(z_np.shape[1]))
+        else:
+            features.append(z_pat.mean(axis=0))
+    X = np.array(features)
+
+    n_splits = min(n_folds, max(2, n_patients // 4))
+    try:
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        pooled_true, pooled_pred = [], []
+        for tr, te in skf.split(X, y):
+            clf = LogisticRegression(penalty='l1', solver='saga',
+                                     max_iter=2000, random_state=seed, C=1.0)
+            clf.fit(X[tr], y[tr])
+            proba = clf.predict_proba(X[te])
+            preds = proba[:, 1] if proba.shape[1] == 2 else np.full(len(te), 0.5)
+            pooled_true.extend(y[te].tolist())
+            pooled_pred.extend(preds.tolist())
+        return float(roc_auc_score(pooled_true, pooled_pred))
+    except (ValueError, Exception):
+        return float('nan')
+
+
+def objective(trial, base_config, data, device, adata=None, has_spatial=True,
+              graph_kwargs=None, tune_for='auroc'):
+    """Optuna objective.
+
+    tune_for:
+      'auroc'  — use patient-level AUROC on held-out fold when labels are
+                 available. Falls back to val_loss if no labels.
+      'recon'  — legacy objective: val_loss - 0.1*silhouette. Does NOT need labels.
+
+    Returns a value Optuna minimizes. For AUROC mode, we return -AUROC so that
+    "lower is better" matches the study direction.
+    """
     config = build_trial_config(trial, base_config)
     config['device'] = device
 
@@ -55,6 +114,9 @@ def objective(trial, base_config, data, device, adata=None, has_spatial=True, gr
         trial_data = prepare_graph_data(
             adata, has_spatial=has_spatial, k_mol=k_mol, **(graph_kwargs or {}))
 
+    has_labels = hasattr(trial_data, 'y') and trial_data.y is not None
+    use_predictor = tune_for == 'auroc' and has_labels
+
     model = GVAEModel(
         n_features=trial_data.x.size(1),
         n_genes=trial_data.x_raw.size(1),
@@ -63,7 +125,7 @@ def objective(trial, base_config, data, device, adata=None, has_spatial=True, gr
         n_heads=config['n_heads'],
         dropout=config['dropout'],
         n_neg_samples=config['n_neg_samples'],
-        use_predictor=False,
+        use_predictor=use_predictor,
     )
     trainer = Trainer(model, config, device=device)
 
@@ -102,15 +164,30 @@ def objective(trial, base_config, data, device, adata=None, has_spatial=True, gr
                 config['beta'] * L_kl)
 
     z_np = outputs['z'].cpu().numpy()
+
+    # Always log silhouette for diagnostics
     n_clusters = min(8, max(2, len(z_np) // 50))
     try:
         labels = KMeans(n_clusters=n_clusters, n_init=3, random_state=0).fit_predict(z_np)
-        if len(set(labels)) > 1:
-            sil = sil_score(z_np, labels, sample_size=min(5000, len(z_np)))
-        else:
-            sil = 0.0
+        sil = sil_score(z_np, labels, sample_size=min(5000, len(z_np))) \
+            if len(set(labels)) > 1 else 0.0
     except Exception:
         sil = 0.0
+
+    trial.set_user_attr('val_loss', float(val_loss))
+    trial.set_user_attr('silhouette', float(sil))
+    trial.set_user_attr('L_adj', L_adj)
+    trial.set_user_attr('L_expr', L_expr)
+    trial.set_user_attr('L_contrast', L_contrast)
+    trial.set_user_attr('L_kl', L_kl)
+
+    if tune_for == 'auroc' and has_labels:
+        auroc = _auroc_objective(z_np, data_dev)
+        trial.set_user_attr('auroc', auroc)
+        if np.isnan(auroc):
+            # Fall back to val_loss if the AUROC computation couldn't be done
+            return val_loss - 0.1 * sil
+        return -auroc  # minimize negative AUROC
 
     return val_loss - 0.1 * sil
 
@@ -188,13 +265,16 @@ def retrain_top_k(top_configs, data, base_config, device, output_dir, k=3,
 
 def main():
     parser = argparse.ArgumentParser(description='Optuna hyperparameter tuning')
-    parser.add_argument('--config', choices=['local', 'full'], default='local')
+    parser.add_argument('--config', choices=['local', 'full', 'tuned_melanoma'], default='local')
     parser.add_argument('--data', choices=list(DATASETS.keys()) + ['synthetic'], default='synthetic')
     parser.add_argument('--max-cells', type=int, default=None)
     parser.add_argument('--n-hvg', type=int, default=2000)
     parser.add_argument('--n-trials', type=int, default=50)
     parser.add_argument('--n-retrain', type=int, default=3)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--objective', choices=['auroc', 'recon'], default='auroc',
+                        help="'auroc' tunes for patient-level response AUROC (needs labels); "
+                             "'recon' tunes for reconstruction+silhouette (legacy, label-free).")
     args = parser.parse_args()
 
     base_config = CONFIGS[args.config].copy()
@@ -202,7 +282,8 @@ def main():
     output_dir = Path('outputs') / f'{args.data}_tune'
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Optuna HPO | Data: {args.data} | Trials: {args.n_trials} | Device: {device}")
+    print(f"Optuna HPO | Data: {args.data} | Trials: {args.n_trials} | "
+          f"Objective: {args.objective} | Device: {device}")
 
     if args.data == 'synthetic':
         adata = create_synthetic_data(
@@ -230,7 +311,8 @@ def main():
 
     def _objective(trial):
         return objective(trial, base_config, data, device,
-                         adata=adata, has_spatial=has_spatial, graph_kwargs=graph_kwargs)
+                         adata=adata, has_spatial=has_spatial, graph_kwargs=graph_kwargs,
+                         tune_for=args.objective)
 
     print(f"\nRunning {args.n_trials} trials...")
     study.optimize(_objective, n_trials=args.n_trials, show_progress_bar=True)
@@ -264,6 +346,11 @@ def main():
     results = {
         'dataset': args.data,
         'n_trials': args.n_trials,
+        'objective': args.objective,
+        'objective_note': (
+            'Minimized -AUROC (so best_value = -best AUROC).' if args.objective == 'auroc'
+            else 'Minimized val_loss - 0.1*silhouette (legacy, NOT tuned for AUROC).'
+        ),
         'best_value': study.best_value,
         'best_params': study.best_params,
         'all_trials': all_trials,

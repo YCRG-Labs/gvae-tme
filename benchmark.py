@@ -642,7 +642,7 @@ class SyntheticSpikeInExperiment:
 
     @staticmethod
     def run(adata, info, config, output_dir, fractions=(0.01, 0.02, 0.05),
-            effect_sizes=(1.0, 2.0), seed=42):
+            effect_sizes=(3.0, 5.0), seed=42):
         has_spatial = info.get('has_spatial', False)
         graph_kwargs = {'r_spatial': info.get('r_spatial', 82.5)}
         results = []
@@ -657,9 +657,9 @@ class SyntheticSpikeInExperiment:
                 trial = {'fraction': frac, 'effect_size': es, 'n_spiked': n_spike}
 
                 trial_config = config.copy()
-                trial_config['epochs_phase1'] = min(100, config.get('epochs_phase1', 300))
+                trial_config['epochs_phase1'] = min(200, config.get('epochs_phase1', 300))
                 trial_config['epochs_phase2'] = 0
-                trial_config['patience'] = 20
+                trial_config['patience'] = 30
 
                 data = prepare_graph_data(ad, has_spatial=has_spatial, **graph_kwargs)
                 model = build_model(trial_config, data, use_predictor=False)
@@ -740,7 +740,7 @@ def run_spike_in(args, config):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', choices=['local', 'full'], default='local')
+    parser.add_argument('--config', choices=['local', 'full', 'tuned_melanoma'], default='local')
     parser.add_argument('--data', choices=list(DATASETS.keys()) + ['synthetic'], default='melanoma')
     parser.add_argument('--max-cells', type=int, default=None)
     parser.add_argument('--n-hvg', type=int, default=2000)

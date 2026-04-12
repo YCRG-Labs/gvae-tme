@@ -75,4 +75,24 @@ FULL = {
     'num_neighbors': [15, 10],
 }
 
-CONFIGS = {'local': LOCAL, 'full': FULL}
+TUNED_MELANOMA = {
+    **FULL,
+    'latent_dim': 16,
+    'n_heads': 8,
+    'hidden_dim': 64,
+    'lambda1': 0.1,
+    'lambda2': 1.0,
+    'beta': 0.001,
+    'gamma': 0.5,
+    'n_neg_samples': 20,
+    'temperature': 0.5,
+    'rare_threshold': 2.0,
+    'k_mol': 20,
+    'free_bits': 1.0,
+}
+
+CONFIGS = {
+    'local': LOCAL,
+    'full': FULL,
+    'tuned_melanoma': TUNED_MELANOMA,
+}
