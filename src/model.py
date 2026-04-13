@@ -73,9 +73,11 @@ class GCNEncoder(nn.Module):
         # normalize=True, symmetric Laplacian rescaling divides edge_weight by
         # degree and effectively erases the gate signal — making the gcn_encoder
         # ablation degenerate into "ungated GCN" instead of "GCN with gate".
-        self.conv1 = GCNConv(in_dim, hidden_dim, normalize=False, add_self_loops=False)
-        self.conv_mu = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=False)
-        self.conv_logvar = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=False)
+        # Keep add_self_loops=True so isolated nodes still propagate (disabling
+        # both caused NaN gradients in the predictor step).
+        self.conv1 = GCNConv(in_dim, hidden_dim, normalize=False, add_self_loops=True)
+        self.conv_mu = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=True)
+        self.conv_logvar = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=True)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, edge_weight=None):
