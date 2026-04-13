@@ -273,11 +273,11 @@ def run_benchmark_cv(args, config):
                     for pid in tv_unique_pids if pid in train_pids
                 ])
 
-                # Use the learned AttentionPooling module to extract patient
-                # features instead of mean-z. This gives GVAE parity with its
-                # end-to-end predictor rather than evaluating it with a
-                # hand-engineered feature extractor that washes out the
-                # attention signal.
+                # Concatenate learned attention-pooled features (h_p from the
+                # GVAE predictor) with the hand-engineered cluster proportions +
+                # diversity. Gives L1-LR both signals to pick from — attention-
+                # only was too small for L1 to keep on n=32 melanoma (all coefs
+                # zeroed → constant predictions → 0.5 AUROC).
                 def _pool_attention(z_np, masks, pooling_module, device):
                     z_t = torch.tensor(z_np, dtype=torch.float32, device=device)
                     feats = []
@@ -289,26 +289,27 @@ def run_benchmark_cv(args, config):
                             feats.append(h_p.cpu().numpy())
                     return np.array(feats)
 
+                all_clusters = np.unique(train_labels)
+                features_fit_base = LogisticRegressionBaseline.extract_features(
+                    train_z, train_labels, train_feat_masks, all_clusters=all_clusters)
+                test_feat_masks = [
+                    torch.tensor(test_patient_ids == pid, dtype=torch.bool)
+                    for pid in test_pids_sorted
+                ]
+                features_test_base = LogisticRegressionBaseline.extract_features(
+                    test_z, test_labels, test_feat_masks, all_clusters=all_clusters)
+
                 if hasattr(model, 'predictor') and model.predictor is not None:
                     device_str = fold_config['device']
-                    features_fit = _pool_attention(
+                    attn_fit = _pool_attention(
                         train_z, train_feat_masks, model.predictor.pooling, device_str)
-                    test_feat_masks = [
-                        torch.tensor(test_patient_ids == pid, dtype=torch.bool)
-                        for pid in test_pids_sorted
-                    ]
-                    features_test = _pool_attention(
+                    attn_test = _pool_attention(
                         test_z, test_feat_masks, model.predictor.pooling, device_str)
+                    features_fit = np.hstack([features_fit_base, attn_fit])
+                    features_test = np.hstack([features_test_base, attn_test])
                 else:
-                    all_clusters = np.unique(train_labels)
-                    features_fit = LogisticRegressionBaseline.extract_features(
-                        train_z, train_labels, train_feat_masks, all_clusters=all_clusters)
-                    test_feat_masks = [
-                        torch.tensor(test_patient_ids == pid, dtype=torch.bool)
-                        for pid in test_pids_sorted
-                    ]
-                    features_test = LogisticRegressionBaseline.extract_features(
-                        test_z, test_labels, test_feat_masks, all_clusters=all_clusters)
+                    features_fit = features_fit_base
+                    features_test = features_test_base
 
                 from sklearn.linear_model import LogisticRegression
                 clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
