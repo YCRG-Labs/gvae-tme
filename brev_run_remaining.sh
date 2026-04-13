@@ -15,7 +15,7 @@ python3 -u benchmark.py --config full --data melanoma --methods gvae,scvi,scanpy
 python3 -u benchmark.py --config full --data nsclc_ici --methods gvae,scvi,scanpy --cv --max-cells 100000 --batch-size 4096 2>&1 | tee outputs/benchmark_nsclc.log
 
 echo "=== CROSS-DATASET TRANSFER ==="
-python3 -u benchmark.py --config full --transfer-source melanoma --transfer-target nsclc_ici --max-cells 100000 2>&1 | tee outputs/transfer.log
+python3 -u train.py --config full --mode transfer_joint --source melanoma --target nsclc_ici --gene-set union --min-shared 500 --max-cells 100000 2>&1 | tee outputs/transfer.log
 
 echo "=== SPIKE-IN VALIDATION ==="
 python3 -u benchmark.py --config full --data melanoma --spike-in --batch-size 4096 2>&1 | tee outputs/spikein.log

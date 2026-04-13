@@ -195,7 +195,14 @@ class CrossDatasetTransfer:
               f"(source={len(source_genes)}, target={len(target_genes)})")
 
         if len(shared_genes) < 500:
-            return None, {'note': f'Only {len(shared_genes)} shared genes, need >= 500'}
+            return None, {
+                'note': (
+                    f'Only {len(shared_genes)} shared genes after per-dataset HVG selection. '
+                    f'benchmark.py:run_transfer uses naive intersection on pre-filtered HVGs. '
+                    f'Use train.py --mode transfer_joint --gene-set union instead, which '
+                    f'selects HVGs jointly before intersecting.'
+                )
+            }
 
         target_ad = target_adata[:, shared_genes].copy()
         source_ad = source_adata[:, shared_genes].copy()
