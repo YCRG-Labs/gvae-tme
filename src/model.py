@@ -77,9 +77,12 @@ class GCNEncoder(nn.Module):
 
     def __init__(self, in_dim, hidden_dim=64, latent_dim=32, dropout=0.2):
         super().__init__()
-        self.conv1 = GraphConv(in_dim, hidden_dim, aggr='add')
-        self.conv_mu = GraphConv(hidden_dim, latent_dim, aggr='add')
-        self.conv_logvar = GraphConv(hidden_dim, latent_dim, aggr='add')
+        # aggr='mean' prevents unbounded summation blow-up over high-degree
+        # neighborhoods × 3 layers (seen: logvar overflow in np.exp during
+        # downstream clustering with aggr='add').
+        self.conv1 = GraphConv(in_dim, hidden_dim, aggr='mean')
+        self.conv_mu = GraphConv(hidden_dim, latent_dim, aggr='mean')
+        self.conv_logvar = GraphConv(hidden_dim, latent_dim, aggr='mean')
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, edge_weight=None):
@@ -87,6 +90,7 @@ class GCNEncoder(nn.Module):
         h = self.dropout(h)
         mu = self.conv_mu(h, edge_index, edge_weight)
         logvar = self.conv_logvar(h, edge_index, edge_weight)
+        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
         return mu, logvar
 
 
