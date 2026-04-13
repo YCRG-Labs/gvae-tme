@@ -144,10 +144,28 @@ print("\n  Note: All methods use L1-logistic regression on extracted features.")
 print("  GVAE end-to-end (attention pooling) results are in the CV section above.")
 
 section("CROSS-DATASET TRANSFER (Melanoma -> NSCLC)")
-transfer_dir = os.path.join(RESULTS, "melanoma_to_nsclc_ici_transfer")
-transfer_json = os.path.join(transfer_dir, "transfer_results.json")
-if os.path.exists(transfer_json):
-    r = json.load(open(transfer_json))
+transfer_joint = os.path.join(RESULTS, "melanoma_to_nsclc_ici", "transfer_joint", "transfer_joint_results.json")
+transfer_old = os.path.join(RESULTS, "melanoma_to_nsclc_ici_transfer", "transfer_results.json")
+if os.path.exists(transfer_joint):
+    r = json.load(open(transfer_joint))
+    tc = r.get("target_clustering", {})
+    tr = r.get("target_rare_cells", {})
+    mc = r.get("marker_concordance", {})
+    print(f"\n  Source: {r.get('source_dataset','?')} ({r.get('source_n_cells','?')} cells) -> "
+          f"Target: {r.get('target_dataset','?')} ({r.get('target_n_cells','?')} cells)")
+    print(f"  Gene set: {r.get('gene_set','?')} | Shared genes: {r.get('n_shared_genes','?')}")
+    if tc:
+        print(f"  Target clustering: {tc.get('n_clusters','?')} clusters, "
+              f"silhouette={tc.get('silhouette',0):.3f}")
+    if tr:
+        print(f"  Target rare cells: {tr.get('n_rare','?')} "
+              f"({tr.get('fraction',0)*100:.2f}%)")
+    if mc:
+        print(f"  Marker concordance: Jaccard={mc.get('jaccard',0):.3f} "
+              f"({mc.get('n_overlap','?')} shared / "
+              f"{mc.get('n_source_markers',0)+mc.get('n_target_markers',0)} total)")
+elif os.path.exists(transfer_old):
+    r = json.load(open(transfer_old))
     te = r.get("transfer_evaluation", {})
     print(f"\n  Source: {r.get('source','?')} -> Target: {r.get('target','?')}")
     print(f"  Shared genes: {r.get('n_shared_genes','?')}")
@@ -158,22 +176,7 @@ if os.path.exists(transfer_json):
     if tr:
         print(f"  Target rare cells: {tr.get('n_rare','?')}")
 else:
-    log_path = os.path.join(RESULTS, "transfer.log")
-    if os.path.exists(log_path):
-        with open(log_path) as f:
-            content = f.read()
-        if "Transfer failed" in content:
-            for line in content.strip().split('\n'):
-                if "Transfer" in line or "shared genes" in line:
-                    print(f"  {line.strip()}")
-        elif "ambiguous" in content:
-            print("  Transfer failed (flag error)")
-        else:
-            for line in content.strip().split('\n')[-5:]:
-                if line.strip():
-                    print(f"  {line.strip()}")
-    else:
-        print("  Not available")
+    print("  Not available")
 
 section("SPIKE-IN VALIDATION (Rare Cell Recovery)")
 spikein_json = os.path.join(RESULTS, "melanoma_spike_in", "spike_in_results.json")
