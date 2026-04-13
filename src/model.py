@@ -69,9 +69,13 @@ class GCNEncoder(nn.Module):
 
     def __init__(self, in_dim, hidden_dim=64, latent_dim=32, dropout=0.2):
         super().__init__()
-        self.conv1 = GCNConv(in_dim, hidden_dim)
-        self.conv_mu = GCNConv(hidden_dim, latent_dim)
-        self.conv_logvar = GCNConv(hidden_dim, latent_dim)
+        # normalize=False preserves the hybrid gate edge_weight. With PyG's default
+        # normalize=True, symmetric Laplacian rescaling divides edge_weight by
+        # degree and effectively erases the gate signal — making the gcn_encoder
+        # ablation degenerate into "ungated GCN" instead of "GCN with gate".
+        self.conv1 = GCNConv(in_dim, hidden_dim, normalize=False, add_self_loops=False)
+        self.conv_mu = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=False)
+        self.conv_logvar = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=False)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, edge_weight=None):
