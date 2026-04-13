@@ -27,16 +27,15 @@ for k, v in r.items():
 
 print()
 print('=== Key metrics ===')
-for section in ['source_downstream', 'transfer_evaluation', 'target_evaluation',
-                'clustering', 'rare_cells', 'marker_concordance']:
-    if section in r:
+for section, v in r.items():
+    if section in ('shared_genes', 'config'):
+        continue
+    if isinstance(v, dict):
         print(f'\n{section}:')
-        v = r[section]
-        if isinstance(v, dict):
-            for kk, vv in v.items():
-                if isinstance(vv, (int, float, str, bool)):
-                    print(f'  {kk}: {vv}')
-                elif isinstance(vv, dict):
-                    print(f'  {kk}: {{...{len(vv)} keys}}')
-                elif isinstance(vv, list):
-                    print(f'  {kk}: [{len(vv)} items]')
+        for kk, vv in v.items():
+            if isinstance(vv, (int, float, str, bool)):
+                print(f'  {kk}: {vv}')
+            elif isinstance(vv, dict):
+                print(f'  {kk}: {{...{len(vv)} keys}}')
+            elif isinstance(vv, list):
+                print(f'  {kk}: [{len(vv)} items]')
