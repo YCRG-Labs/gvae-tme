@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import MessagePassing, GCNConv
+from torch_geometric.nn import MessagePassing, GCNConv, GraphConv
 from torch_geometric.utils import softmax
 
 class CellAdaptiveGate(nn.Module):
@@ -66,18 +66,20 @@ class GATEncoder(nn.Module):
 
 
 class GCNEncoder(nn.Module):
+    """Graph-convolutional encoder that respects the hybrid gate edge_weight.
+
+    Uses GraphConv (h_i = W_1*x_i + W_2*sum(w_ij * x_j)) instead of GCNConv,
+    because GCNConv applies symmetric Laplacian normalization that rescales
+    edge_weight by degree and erases the gate signal. GraphConv passes
+    edge_weight through directly, so the ablation isolates "replace GAT with
+    simpler aggregation" without secretly also removing the gate.
+    """
 
     def __init__(self, in_dim, hidden_dim=64, latent_dim=32, dropout=0.2):
         super().__init__()
-        # normalize=False preserves the hybrid gate edge_weight. With PyG's default
-        # normalize=True, symmetric Laplacian rescaling divides edge_weight by
-        # degree and effectively erases the gate signal — making the gcn_encoder
-        # ablation degenerate into "ungated GCN" instead of "GCN with gate".
-        # Keep add_self_loops=True so isolated nodes still propagate (disabling
-        # both caused NaN gradients in the predictor step).
-        self.conv1 = GCNConv(in_dim, hidden_dim, normalize=False, add_self_loops=True)
-        self.conv_mu = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=True)
-        self.conv_logvar = GCNConv(hidden_dim, latent_dim, normalize=False, add_self_loops=True)
+        self.conv1 = GraphConv(in_dim, hidden_dim, aggr='add')
+        self.conv_mu = GraphConv(hidden_dim, latent_dim, aggr='add')
+        self.conv_logvar = GraphConv(hidden_dim, latent_dim, aggr='add')
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, edge_weight=None):
