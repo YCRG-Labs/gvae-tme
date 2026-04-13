@@ -47,11 +47,16 @@ def build_trial_config(trial, base_config):
 
 
 def _auroc_objective(z_np, data, n_folds=5, seed=0):
-    """Patient-level AUROC via held-out fold on embeddings.
+    """Patient-level AUROC via 5-fold CV on frozen embeddings.
 
-    Mirrors LogisticRegressionBaseline.extract_features but computes a single
-    train/test split (fast) to score this Optuna trial. Returns NaN if labels
-    absent or only one class present.
+    Uses src/ablations.py:_choose_cv_splitter for small-cohort-aware CV
+    (LOO for n<20, RepeatedStratifiedKFold for n<50, StratifiedKFold otherwise).
+    Returns NaN if labels absent or only one class present.
+
+    This is the objective that Optuna minimizes (as -AUROC in objective()).
+    The full CV here matches the evaluation protocol used in train.py/cross-
+    validation mode, so HPO-selected configs actually transfer to the final
+    CV run instead of being single-split artifacts.
     """
     if not hasattr(data, 'y') or data.y is None:
         return float('nan')
@@ -63,6 +68,8 @@ def _auroc_objective(z_np, data, n_folds=5, seed=0):
         return float('nan')
 
     from sklearn.linear_model import LogisticRegression
+    from src.ablations import _choose_cv_splitter
+
     masks = data.patient_masks
     n_patients = len(y)
 
@@ -76,11 +83,10 @@ def _auroc_objective(z_np, data, n_folds=5, seed=0):
             features.append(z_pat.mean(axis=0))
     X = np.array(features)
 
-    n_splits = min(n_folds, max(2, n_patients // 4))
+    splitter, _ = _choose_cv_splitter(n_patients, n_folds, seed)
     try:
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
         pooled_true, pooled_pred = [], []
-        for tr, te in skf.split(X, y):
+        for tr, te in splitter.split(X, y):
             clf = LogisticRegression(penalty='l1', solver='saga',
                                      max_iter=2000, random_state=seed, C=1.0)
             clf.fit(X[tr], y[tr])
