@@ -58,13 +58,19 @@ for ds in ["nsclc_scrna", "breast", "nsclc_visium"]:
             print(f"    Attention selectivity: {attn.get('mean_selectivity', 'N/A'):.3f} +/- {attn.get('std_selectivity', 'N/A'):.3f}")
         sigs = r.get("rare_cells", {}).get("immunosuppressive_signatures", {})
         if sigs:
-            print(f"    Immunosuppressive signatures:")
+            print(f"    Immunosuppressive signatures (effect / p / marker genes found):")
             for sig_name, sig_data in sigs.items():
                 if isinstance(sig_data, dict) and "p_value" in sig_data:
                     p = sig_data["p_value"]
                     eff = sig_data.get("effect_size", 0)
+                    n_avail = sig_data.get("n_available", "?")
+                    n_total = sig_data.get("n_total", "?")
                     stars = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
-                    print(f"      {sig_name}: effect={eff:.3f}, p={p:.2e} {stars}")
+                    print(f"      {sig_name}: effect={eff:+.3f}, p={p:.2e} {stars}  [{n_avail}/{n_total} markers in HVG set]")
+                elif isinstance(sig_data, dict) and "note" in sig_data:
+                    n_avail = sig_data.get("n_available", 0)
+                    n_total = sig_data.get("n_total", "?")
+                    print(f"      {sig_name}: {sig_data['note']}  [{n_avail}/{n_total} markers]")
         lr = r.get("ligand_receptor", {})
         if lr:
             n_int = lr.get("n_interactions", 0)
