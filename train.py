@@ -57,6 +57,10 @@ def load_real_data(dataset_name, n_hvg=2000, max_cells=None):
                 sc.pp.highly_variable_genes(adata, n_top_genes=min(n_hvg, adata.n_vars), flavor='cell_ranger')
             else:
                 raise
+    # Stash the pre-HVG full gene set on .raw so downstream signature analysis
+    # (e.g. ImmunosuppressiveSignatures) can score curated marker lists even
+    # when those markers don't survive HVG selection.
+    adata.raw = adata
     adata = adata[:, adata.var['highly_variable']].copy()
     if 'X_pca' not in adata.obsm:
         n_comps = min(50, adata.n_obs - 1, adata.n_vars - 1)

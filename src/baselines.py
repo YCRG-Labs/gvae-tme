@@ -128,18 +128,32 @@ class ImmunosuppressiveSignatures:
     }
 
     @staticmethod
-    def score_cells(adata, gene_list):
-        available = [g for g in gene_list if g in adata.var_names]
+    def score_cells(adata, gene_list, use_raw=False):
+        """Score cells by the mean expression of a curated marker list.
+
+        When use_raw=True and adata.raw is present, score against the pre-HVG
+        full gene set so curated markers that didn't survive HVG selection
+        still contribute. Falls back to adata.var_names if raw is missing.
+        """
+        source = adata.raw if use_raw and adata.raw is not None else adata
+        var_names = source.var_names
+        available = [g for g in gene_list if g in var_names]
         if len(available) == 0:
             return np.zeros(adata.n_obs), 0
-        X_sub = adata[:, available].X
+        if use_raw and adata.raw is not None:
+            # adata.raw only supports gene subsetting through .to_adata() or
+            # an index selection on raw directly; raw[:, available] returns a
+            # Raw view whose .X is the matrix we want.
+            X_sub = adata.raw[:, available].X
+        else:
+            X_sub = adata[:, available].X
         if hasattr(X_sub, 'toarray'):
             X_sub = X_sub.toarray()
         scores = np.asarray(X_sub).mean(axis=1).flatten()
         return scores, len(available)
 
     @staticmethod
-    def compare_rare_vs_nonrare(adata, is_rare, signatures=None):
+    def compare_rare_vs_nonrare(adata, is_rare, signatures=None, use_raw=True):
         if signatures is None:
             signatures = ImmunosuppressiveSignatures.SIGNATURES
 
@@ -148,7 +162,8 @@ class ImmunosuppressiveSignatures:
 
         results = {}
         for sig_name, gene_list in signatures.items():
-            scores, n_available = ImmunosuppressiveSignatures.score_cells(adata, gene_list)
+            scores, n_available = ImmunosuppressiveSignatures.score_cells(
+                adata, gene_list, use_raw=use_raw)
             if n_available == 0:
                 results[sig_name] = {
                     'note': 'No signature genes found in HVG set',
