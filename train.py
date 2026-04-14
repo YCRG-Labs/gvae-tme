@@ -301,7 +301,7 @@ def run_downstream(model, data, config, adata, output_dir, ablation=None):
     # AUROC reported in metrics.json; the attention-pooling single-split value
     # above is kept for reference as `prediction.single_split_auroc`.
     logreg_results = {}
-    if hasattr(data, 'y'):
+    if hasattr(data, 'y') and data.y is not None and hasattr(data, 'patient_masks'):
         y = data.y.cpu().numpy()
         logreg_results = LogisticRegressionBaseline.run(
             z, labels, data.patient_masks, y)
