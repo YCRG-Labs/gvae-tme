@@ -77,18 +77,18 @@ FULL = {
 
 TUNED_MELANOMA = {
     **FULL,
-    'latent_dim': 32,
-    'n_heads': 1,
-    'hidden_dim': 32,
-    'lambda1': 0.1,
+    'latent_dim': 64,
+    'n_heads': 8,
+    'hidden_dim': 64,
+    'lambda1': 1.0,
     'lambda2': 1.0,
-    'beta': 0.01,
-    'gamma': 0.01,
+    'beta': 0.1,
+    'gamma': 0.05,
     'n_neg_samples': 20,
     'temperature': 0.5,
-    'rare_threshold': 2.5,
+    'rare_threshold': 1.5,
     'k_mol': 30,
-    'free_bits': 0.5,
+    'free_bits': 1.0,
 }
 
 CONFIGS = {
