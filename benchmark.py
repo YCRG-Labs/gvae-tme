@@ -196,131 +196,141 @@ def run_benchmark_cv(args, config):
             fold_dir.mkdir(parents=True, exist_ok=True)
 
             if method == 'gvae':
-                fold_config = config.copy()
-                train_val_mask = np.isin(patient_ids,
-                    list(train_pids) + list(val_pids))
-                ad_train_val = adata[train_val_mask].copy()
-                n_comps = min(50, ad_train_val.n_obs - 1, ad_train_val.n_vars - 1)
-                sc.pp.pca(ad_train_val, n_comps=n_comps)
+                # Seed ensemble: train args.n_seeds GVAE models, average their
+                # out-of-fold predictions. Empirically stabilizes small-cohort
+                # benchmark numbers (n=32 melanoma fold lottery).
+                fold_predictions = []
+                y_test = None
+                for seed in range(args.n_seeds):
+                    torch.manual_seed(seed)
+                    np.random.seed(seed)
+                    fold_config = config.copy()
+                    seed_dir = fold_dir / f'seed_{seed}' if args.n_seeds > 1 else fold_dir
+                    seed_dir.mkdir(parents=True, exist_ok=True)
 
-                if ad_train_val.n_obs > 50_000 and fold_config.get('batch_size') is None:
-                    fold_config['batch_size'] = 512
+                    train_val_mask = np.isin(patient_ids,
+                        list(train_pids) + list(val_pids))
+                    ad_train_val = adata[train_val_mask].copy()
+                    n_comps = min(50, ad_train_val.n_obs - 1, ad_train_val.n_vars - 1)
+                    sc.pp.pca(ad_train_val, n_comps=n_comps)
 
-                data = prepare_graph_data(ad_train_val, has_spatial=has_spatial, **graph_kwargs)
+                    if ad_train_val.n_obs > 50_000 and fold_config.get('batch_size') is None:
+                        fold_config['batch_size'] = 512
 
-                tv_patient_ids = ad_train_val.obs['patient_id'].values
-                tv_unique_pids = np.unique(tv_patient_ids)
-                tv_pid_to_idx = {pid: i for i, pid in enumerate(tv_unique_pids)}
+                    data = prepare_graph_data(ad_train_val, has_spatial=has_spatial, **graph_kwargs)
 
-                train_idx = [tv_pid_to_idx[p] for p in sorted(train_pids) if p in tv_pid_to_idx]
-                val_idx = [tv_pid_to_idx[p] for p in sorted(val_pids) if p in tv_pid_to_idx]
-                data.train_patient_idx = torch.tensor(train_idx, dtype=torch.long)
-                data.val_patient_idx = torch.tensor(val_idx, dtype=torch.long)
-                data.test_patient_idx = torch.tensor([], dtype=torch.long)
+                    tv_patient_ids = ad_train_val.obs['patient_id'].values
+                    tv_unique_pids = np.unique(tv_patient_ids)
+                    tv_pid_to_idx = {pid: i for i, pid in enumerate(tv_unique_pids)}
 
-                cell_train = np.array([pid in train_pids for pid in tv_patient_ids])
-                cell_val = np.array([pid in val_pids for pid in tv_patient_ids])
-                data.train_mask = torch.tensor(cell_train, dtype=torch.bool)
-                data.val_mask = torch.tensor(cell_val, dtype=torch.bool)
-                data.test_mask = torch.tensor(np.zeros(len(tv_patient_ids), dtype=bool))
+                    train_idx = [tv_pid_to_idx[p] for p in sorted(train_pids) if p in tv_pid_to_idx]
+                    val_idx = [tv_pid_to_idx[p] for p in sorted(val_pids) if p in tv_pid_to_idx]
+                    data.train_patient_idx = torch.tensor(train_idx, dtype=torch.long)
+                    data.val_patient_idx = torch.tensor(val_idx, dtype=torch.long)
+                    data.test_patient_idx = torch.tensor([], dtype=torch.long)
 
-                model = build_model(fold_config, data, use_predictor=True)
-                trainer = make_trainer(model, fold_config, fold_config['device'],
-                                       fold_dir, data=data)
-                trainer.train(data)
+                    cell_train = np.array([pid in train_pids for pid in tv_patient_ids])
+                    cell_val = np.array([pid in val_pids for pid in tv_patient_ids])
+                    data.train_mask = torch.tensor(cell_train, dtype=torch.bool)
+                    data.val_mask = torch.tensor(cell_val, dtype=torch.bool)
+                    data.test_mask = torch.tensor(np.zeros(len(tv_patient_ids), dtype=bool))
 
-                model.eval()
-                with torch.no_grad():
-                    train_z = model(data.to(fold_config['device']))['z'].cpu().numpy()
-                train_labels_obj = ClusteringAnalyzer()
-                best_res, _ = train_labels_obj.select_resolution(train_z)
-                train_labels, _ = train_labels_obj.cluster(train_z, resolution=best_res)
+                    model = build_model(fold_config, data, use_predictor=True)
+                    trainer = make_trainer(model, fold_config, fold_config['device'],
+                                           seed_dir, data=data)
+                    trainer.train(data)
 
-                from sklearn.decomposition import PCA as SkPCA
-                X_tv = ad_train_val.X
-                if hasattr(X_tv, 'toarray'):
-                    X_tv = X_tv.toarray()
-                pca_fit = SkPCA(n_components=n_comps).fit(X_tv)
-
-                test_cell_mask = np.isin(patient_ids, list(test_pids))
-                X_test = adata[test_cell_mask].X
-                if hasattr(X_test, 'toarray'):
-                    X_test = X_test.toarray()
-                test_pca = pca_fit.transform(X_test)
-
-                ad_test = adata[test_cell_mask].copy()
-                ad_test.obsm['X_pca'] = test_pca
-                test_data = prepare_graph_data(ad_test, has_spatial=has_spatial, **graph_kwargs)
-
-                with torch.no_grad():
-                    test_outputs = model(test_data.to(fold_config['device']))
-                test_z = test_outputs['z'].cpu().numpy()
-
-                from sklearn.neighbors import KNeighborsClassifier
-                knn_clf = KNeighborsClassifier(n_neighbors=15)
-                knn_clf.fit(train_z, train_labels)
-                test_labels = knn_clf.predict(test_z)
-
-                test_patient_ids = patient_ids[test_cell_mask]
-                test_pids_sorted = sorted(test_pids)
-
-                train_feat_masks = [
-                    torch.tensor(tv_patient_ids == pid, dtype=torch.bool)
-                    for pid in tv_unique_pids if pid in train_pids
-                ]
-                train_resp = np.array([
-                    patient_responses[list(unique_pids).index(pid)]
-                    for pid in tv_unique_pids if pid in train_pids
-                ])
-
-                # Concatenate learned attention-pooled features (h_p from the
-                # GVAE predictor) with the hand-engineered cluster proportions +
-                # diversity. Gives L1-LR both signals to pick from — attention-
-                # only was too small for L1 to keep on n=32 melanoma (all coefs
-                # zeroed → constant predictions → 0.5 AUROC).
-                def _pool_attention(z_np, masks, pooling_module, device):
-                    z_t = torch.tensor(z_np, dtype=torch.float32, device=device)
-                    feats = []
-                    pooling_module.eval()
+                    model.eval()
                     with torch.no_grad():
-                        for m in masks:
-                            m_t = m.to(device)
-                            h_p, _ = pooling_module(z_t, m_t)
-                            feats.append(h_p.cpu().numpy())
-                    return np.array(feats)
+                        train_z = model(data.to(fold_config['device']))['z'].cpu().numpy()
+                    train_labels_obj = ClusteringAnalyzer()
+                    best_res, _ = train_labels_obj.select_resolution(train_z)
+                    train_labels, _ = train_labels_obj.cluster(train_z, resolution=best_res)
 
-                all_clusters = np.unique(train_labels)
-                features_fit_base = LogisticRegressionBaseline.extract_features(
-                    train_z, train_labels, train_feat_masks, all_clusters=all_clusters)
-                test_feat_masks = [
-                    torch.tensor(test_patient_ids == pid, dtype=torch.bool)
-                    for pid in test_pids_sorted
-                ]
-                features_test_base = LogisticRegressionBaseline.extract_features(
-                    test_z, test_labels, test_feat_masks, all_clusters=all_clusters)
+                    from sklearn.decomposition import PCA as SkPCA
+                    X_tv = ad_train_val.X
+                    if hasattr(X_tv, 'toarray'):
+                        X_tv = X_tv.toarray()
+                    pca_fit = SkPCA(n_components=n_comps).fit(X_tv)
 
-                if hasattr(model, 'predictor') and model.predictor is not None:
-                    device_str = fold_config['device']
-                    attn_fit = _pool_attention(
-                        train_z, train_feat_masks, model.predictor.pooling, device_str)
-                    attn_test = _pool_attention(
-                        test_z, test_feat_masks, model.predictor.pooling, device_str)
-                    features_fit = np.hstack([features_fit_base, attn_fit])
-                    features_test = np.hstack([features_test_base, attn_test])
-                else:
-                    features_fit = features_fit_base
-                    features_test = features_test_base
+                    test_cell_mask = np.isin(patient_ids, list(test_pids))
+                    X_test = adata[test_cell_mask].X
+                    if hasattr(X_test, 'toarray'):
+                        X_test = X_test.toarray()
+                    test_pca = pca_fit.transform(X_test)
 
-                from sklearn.linear_model import LogisticRegression
-                clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
-                                          random_state=42, C=1.0)
-                clf.fit(features_fit, train_resp)
-                proba = clf.predict_proba(features_test)
-                y_test = np.array([
-                    patient_responses[list(unique_pids).index(pid)]
-                    for pid in test_pids_sorted
-                ])
-                y_pred_test = proba[:, 1] if proba.shape[1] == 2 else np.full(len(y_test), 0.5)
+                    ad_test = adata[test_cell_mask].copy()
+                    ad_test.obsm['X_pca'] = test_pca
+                    test_data = prepare_graph_data(ad_test, has_spatial=has_spatial, **graph_kwargs)
+
+                    with torch.no_grad():
+                        test_outputs = model(test_data.to(fold_config['device']))
+                    test_z = test_outputs['z'].cpu().numpy()
+
+                    from sklearn.neighbors import KNeighborsClassifier
+                    knn_clf = KNeighborsClassifier(n_neighbors=15)
+                    knn_clf.fit(train_z, train_labels)
+                    test_labels = knn_clf.predict(test_z)
+
+                    test_patient_ids = patient_ids[test_cell_mask]
+                    test_pids_sorted = sorted(test_pids)
+
+                    train_feat_masks = [
+                        torch.tensor(tv_patient_ids == pid, dtype=torch.bool)
+                        for pid in tv_unique_pids if pid in train_pids
+                    ]
+                    train_resp = np.array([
+                        patient_responses[list(unique_pids).index(pid)]
+                        for pid in tv_unique_pids if pid in train_pids
+                    ])
+
+                    # Concatenate learned attention-pooled features (h_p) with
+                    # hand-engineered cluster proportions + diversity.
+                    def _pool_attention(z_np, masks, pooling_module, device):
+                        z_t = torch.tensor(z_np, dtype=torch.float32, device=device)
+                        feats = []
+                        pooling_module.eval()
+                        with torch.no_grad():
+                            for m in masks:
+                                m_t = m.to(device)
+                                h_p, _ = pooling_module(z_t, m_t)
+                                feats.append(h_p.cpu().numpy())
+                        return np.array(feats)
+
+                    all_clusters = np.unique(train_labels)
+                    features_fit_base = LogisticRegressionBaseline.extract_features(
+                        train_z, train_labels, train_feat_masks, all_clusters=all_clusters)
+                    test_feat_masks = [
+                        torch.tensor(test_patient_ids == pid, dtype=torch.bool)
+                        for pid in test_pids_sorted
+                    ]
+                    features_test_base = LogisticRegressionBaseline.extract_features(
+                        test_z, test_labels, test_feat_masks, all_clusters=all_clusters)
+
+                    if hasattr(model, 'predictor') and model.predictor is not None:
+                        device_str = fold_config['device']
+                        attn_fit = _pool_attention(
+                            train_z, train_feat_masks, model.predictor.pooling, device_str)
+                        attn_test = _pool_attention(
+                            test_z, test_feat_masks, model.predictor.pooling, device_str)
+                        features_fit = np.hstack([features_fit_base, attn_fit])
+                        features_test = np.hstack([features_test_base, attn_test])
+                    else:
+                        features_fit = features_fit_base
+                        features_test = features_test_base
+
+                    from src.ablations import _fit_elastic_net_lr
+                    clf = _fit_elastic_net_lr(features_fit, train_resp, seed=seed)
+                    proba = clf.predict_proba(features_test)
+                    if y_test is None:
+                        y_test = np.array([
+                            patient_responses[list(unique_pids).index(pid)]
+                            for pid in test_pids_sorted
+                        ])
+                    seed_pred = proba[:, 1] if proba.shape[1] == 2 else np.full(len(y_test), 0.5)
+                    fold_predictions.append(seed_pred)
+
+                y_pred_test = np.mean(fold_predictions, axis=0)
 
             elif method == 'scvi':
                 train_val_mask = np.isin(patient_ids,
@@ -396,9 +406,8 @@ def run_benchmark_cv(args, config):
                 ]
                 features_fit = LogisticRegressionBaseline.extract_features(
                     z_train, labels_train, train_feat_masks, all_clusters=all_clusters)
-                clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
-                                          random_state=42, C=1.0)
-                clf.fit(features_fit, train_resp)
+                from src.ablations import _fit_elastic_net_lr
+                clf = _fit_elastic_net_lr(features_fit, train_resp, seed=42)
                 proba = clf.predict_proba(features_test)
                 y_test = np.array([
                     patient_responses[list(unique_pids).index(pid)]
@@ -457,10 +466,8 @@ def run_benchmark_cv(args, config):
                 features_test = LogisticRegressionBaseline.extract_features(
                     z_test, labels_test, test_feat_masks, all_clusters=all_clusters)
 
-                from sklearn.linear_model import LogisticRegression
-                clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
-                                          random_state=42, C=1.0)
-                clf.fit(features_fit, train_resp)
+                from src.ablations import _fit_elastic_net_lr
+                clf = _fit_elastic_net_lr(features_fit, train_resp, seed=42)
                 proba = clf.predict_proba(features_test)
                 y_test = np.array([
                     patient_responses[list(unique_pids).index(pid)]
@@ -779,6 +786,9 @@ def main():
     parser.add_argument('--batch-size', type=int, default=None)
     parser.add_argument('--transfer-source', type=str, default=None)
     parser.add_argument('--transfer-target', type=str, default=None)
+    parser.add_argument('--n-seeds', type=int, default=1,
+                        help='Number of random seeds to ensemble for GVAE '
+                             '(average predictions across seeds per fold)')
     args = parser.parse_args()
 
     config = CONFIGS[args.config].copy()

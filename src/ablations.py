@@ -1,7 +1,45 @@
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut, RepeatedStratifiedKFold
 from sklearn.metrics import roc_auc_score, average_precision_score
+
+
+def _fit_elastic_net_lr(X_train, y_train, seed=42):
+    """Elastic-net logistic regression with CV-tuned l1_ratio when feasible.
+
+    Pure L1 zeros too many features on small cohorts (n<50) — observed: GVAE
+    melanoma benchmark collapsing to 0.500 because L1 killed all features.
+    Elastic net (Zou & Hastie 2005) keeps sparse selection but stabilizes via
+    L2, which is the standard recommendation for small-sample biomarker
+    classification. LogisticRegressionCV inner-tunes l1_ratio and C when the
+    minority class has >=3 samples; otherwise falls back to a fixed
+    l1_ratio=0.5 elastic net (known-good default).
+    """
+    y_train = np.asarray(y_train).astype(int)
+    n = len(y_train)
+    min_class = int(min(np.bincount(y_train, minlength=2)))
+    if min_class >= 3 and n >= 15:
+        clf = LogisticRegressionCV(
+            penalty='elasticnet',
+            solver='saga',
+            l1_ratios=[0.1, 0.3, 0.5, 0.7, 0.9],
+            Cs=np.logspace(-3, 2, 8),
+            cv=3,
+            scoring='roc_auc',
+            max_iter=5000,
+            random_state=seed,
+        )
+    else:
+        clf = LogisticRegression(
+            penalty='elasticnet',
+            solver='saga',
+            l1_ratio=0.5,
+            C=1.0,
+            max_iter=5000,
+            random_state=seed,
+        )
+    clf.fit(X_train, y_train)
+    return clf
 
 
 def _choose_cv_splitter(n_patients, n_folds, seed):
@@ -98,9 +136,7 @@ class LogisticRegressionBaseline:
 
         for train_idx, test_idx in splitter.split(X, y):
             n_splits += 1
-            clf = LogisticRegression(penalty='l1', solver='saga', max_iter=5000,
-                                     random_state=seed, C=1.0)
-            clf.fit(X[train_idx], y[train_idx])
+            clf = _fit_elastic_net_lr(X[train_idx], y[train_idx], seed=seed)
             proba = clf.predict_proba(X[test_idx])
             if proba.shape[1] == 2:
                 preds = proba[:, 1]
