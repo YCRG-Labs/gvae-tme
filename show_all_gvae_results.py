@@ -11,6 +11,87 @@ def section(title):
     print(f"  {title}")
     print(f"{'='*70}")
 
+
+def _count_gvae_params():
+    """Count parameters of the FULL-config GVAE model. Returns (total, trainable)
+    or (None, None) if torch/model instantiation fails locally."""
+    try:
+        import sys
+        sys.path.insert(0, BASE)
+        from src.model import GVAEModel
+        from src.config import FULL
+        m = GVAEModel(
+            n_features=FULL['latent_dim'],
+            n_genes=FULL['n_genes'],
+            hidden_dim=FULL['hidden_dim'],
+            latent_dim=FULL['latent_dim'],
+            n_heads=FULL['n_heads'],
+            dropout=FULL['dropout'],
+            n_neg_samples=FULL['n_neg_samples'],
+            use_predictor=True,
+            encoder_type=FULL.get('encoder_type', 'gat'),
+            decoder_type=FULL.get('decoder_type', 'zinb'),
+            gate_mode=FULL.get('gate_mode', 'learned'),
+        )
+        total = sum(p.numel() for p in m.parameters())
+        trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
+        return total, trainable
+    except Exception:
+        return None, None
+
+
+def _paired_test(a, b):
+    """Wilcoxon signed-rank test between two paired fold-AUROC arrays.
+    Returns (statistic, p_value) or (None, None) on failure."""
+    try:
+        from scipy.stats import wilcoxon
+        import numpy as np
+        a, b = np.asarray(a), np.asarray(b)
+        if len(a) != len(b) or len(a) < 2:
+            return None, None
+        diffs = a - b
+        if np.allclose(diffs, 0):
+            return 0.0, 1.0
+        stat, p = wilcoxon(a, b, zero_method='wilcox', alternative='two-sided')
+        return float(stat), float(p)
+    except Exception:
+        return None, None
+
+
+section("DATASET SUMMARY")
+print(f"\n  {'Dataset':<15s} {'Patients':>9s} {'Spatial':>8s} {'Response':>9s} {'Role':<40s}")
+print(f"  {'-'*15} {'-'*9} {'-'*8} {'-'*9} {'-'*40}")
+DATASET_INDEX = [
+    ("melanoma",     "melanoma_cv",     "cv_results.json",  "ICI response, scRNA (5-fold CV)"),
+    ("nsclc_ici",    "nsclc_ici_cv",    "cv_results.json",  "ICI response, scRNA (5-fold CV)"),
+    ("colorectal",   "colorectal_cv",   "cv_results.json",  "ICI response, scRNA (5-fold CV)"),
+    ("nsclc_scrna",  "nsclc_scrna",     "metrics.json",     "Unsupervised TME characterization"),
+    ("breast",       "breast",          "metrics.json",     "Unsupervised TME characterization"),
+    ("nsclc_visium", "nsclc_visium",    "metrics.json",     "Spatial TME, gate validation (Visium)"),
+]
+for name, path, fname, role in DATASET_INDEX:
+    fp = os.path.join(RESULTS, path, fname)
+    if not os.path.exists(fp):
+        print(f"  {name:<15s} {'N/A':>9s} {'N/A':>8s} {'N/A':>9s} {role:<40s}")
+        continue
+    try:
+        r = json.load(open(fp))
+        n_pat = r.get('n_patients', '--')
+        gate_mean = r.get("gate", {}).get("mean")
+        has_spatial = "yes" if (gate_mean is not None and gate_mean < 0.99) else "no"
+        has_response = "yes" if "pooled_metrics" in r else "no"
+        print(f"  {name:<15s} {str(n_pat):>9s} {has_spatial:>8s} {has_response:>9s} {role:<40s}")
+    except Exception:
+        print(f"  {name:<15s} {'N/A':>9s} {'N/A':>8s} {'N/A':>9s} {role:<40s}")
+
+total_params, trainable_params = _count_gvae_params()
+if total_params is not None:
+    print(f"\n  GVAE FULL config: {total_params:,} parameters ({trainable_params:,} trainable)")
+    print(f"    latent_dim=32, hidden_dim=64, n_heads=4, encoder=GAT, decoder=ZINB")
+else:
+    print(f"\n  GVAE FULL config: ~1,082,532 parameters (from training log)")
+    print(f"    latent_dim=32, hidden_dim=64, n_heads=4, encoder=GAT, decoder=ZINB")
+
 section("CROSS-VALIDATION (Response Prediction)")
 for name, path in [("Melanoma", "melanoma_cv"), ("NSCLC ICI", "nsclc_ici_cv"), ("Colorectal", "colorectal_cv")]:
     fp = os.path.join(RESULTS, path, "cv_results.json")
@@ -90,35 +171,63 @@ section("ABLATION STUDIES (Melanoma)")
 ablations = ["mol_only", "spatial_only", "static_0.3", "static_0.5", "static_0.7",
              "no_expr", "gaussian", "no_contrastive", "frozen_encoder", "gcn_encoder",
              "rare_leiden", "logreg_baseline"]
-print(f"\n  {'Ablation':<25s} {'AUROC':>7s} {'Clusters':>9s} {'Silhouette':>11s} {'Rare':>6s} {'Gate':>6s}")
-print(f"  {'-'*25} {'-'*7} {'-'*9} {'-'*11} {'-'*6} {'-'*6}")
 
+# Baseline from CV
 base_fp = os.path.join(RESULTS, "melanoma_cv", "cv_results.json")
+baseline = None
 try:
-    r = json.load(open(base_fp))
-    print(f"  {'FULL (baseline)':<25s} {r['pooled_metrics']['auroc']:>7.3f} {'--':>9s} {'--':>11s} {'--':>6s} {'--':>6s}")
-except:
+    base_r = json.load(open(base_fp))
+    baseline = base_r['pooled_metrics']['auroc']
+except Exception:
     pass
 
+# Collect ablation rows, sort by delta (biggest drop first)
+rows = []
 for abl in ablations:
     fp = os.path.join(RESULTS, f"melanoma_{abl}", "metrics.json")
     try:
         r = json.load(open(fp))
-        auroc = r.get("prediction", {}).get("auroc", "N/A")
-        if isinstance(auroc, (int, float)):
-            auroc_str = f"{auroc:.3f}"
-        else:
-            auroc_str = str(auroc)
-        n_clust = r.get("clustering", {}).get("n_clusters", "N/A")
-        sil = r.get("clustering", {}).get("silhouette", 0)
-        n_rare = r.get("rare_cells", {}).get("n_rare", "N/A")
-        gate = r.get("gate", {}).get("mean", "N/A")
-        gate_str = f"{gate:.3f}" if isinstance(gate, (int, float)) else str(gate)
-        print(f"  {abl:<25s} {auroc_str:>7s} {str(n_clust):>9s} {sil:>11.3f} {str(n_rare):>6s} {gate_str:>6s}")
-    except:
-        print(f"  {abl:<25s} {'N/A':>7s}")
+        auroc = r.get("prediction", {}).get("auroc", None)
+        n_clust = r.get("clustering", {}).get("n_clusters", None)
+        sil = r.get("clustering", {}).get("silhouette", None)
+        n_rare = r.get("rare_cells", {}).get("n_rare", None)
+        gate = r.get("gate", {}).get("mean", None)
+        delta = (auroc - baseline) if (isinstance(auroc, (int, float)) and baseline is not None) else None
+        rows.append((abl, auroc, delta, n_clust, sil, n_rare, gate))
+    except Exception:
+        rows.append((abl, None, None, None, None, None, None))
 
-section("BENCHMARK: GVAE vs scVI vs Scanpy (L1-LogReg on embeddings)")
+# Sort: biggest negative delta first (worst drop at top)
+def _sort_key(row):
+    d = row[2]
+    return (0 if d is None else d)
+rows.sort(key=_sort_key)
+
+print(f"\n  Ranked by impact (biggest AUROC drop first). FULL baseline = "
+      f"{baseline:.3f} (from 5-fold CV).")
+print(f"\n  {'Ablation':<22s} {'AUROC':>7s} {'Δ':>7s} {'Clust':>6s} {'Sil':>7s} {'Rare':>6s} {'Gate':>6s}")
+print(f"  {'-'*22} {'-'*7} {'-'*7} {'-'*6} {'-'*7} {'-'*6} {'-'*6}")
+if baseline is not None:
+    print(f"  {'FULL (baseline)':<22s} {baseline:>7.3f} {'--':>7s} {'--':>6s} {'--':>7s} {'--':>6s} {'--':>6s}")
+for abl, auroc, delta, n_clust, sil, n_rare, gate in rows:
+    auroc_str = f"{auroc:.3f}" if isinstance(auroc, (int, float)) else "N/A"
+    delta_str = f"{delta:+.3f}" if isinstance(delta, (int, float)) else "N/A"
+    sil_str = f"{sil:.3f}" if isinstance(sil, (int, float)) else "N/A"
+    gate_str = f"{gate:.3f}" if isinstance(gate, (int, float)) else "N/A"
+    print(f"  {abl:<22s} {auroc_str:>7s} {delta_str:>7s} "
+          f"{str(n_clust) if n_clust is not None else 'N/A':>6s} "
+          f"{sil_str:>7s} "
+          f"{str(n_rare) if n_rare is not None else 'N/A':>6s} "
+          f"{gate_str:>6s}")
+
+print("""
+  Interpretation: the top rows are the components whose removal hurts
+  performance the most, i.e. the components the model critically depends on.
+  Rows with positive Δ beat the full model and are candidates for paper-
+  worthy findings ("removing X is not only neutral but helps"), though
+  with n=32 melanoma any single positive Δ is within fold variance.""")
+
+section("BENCHMARK: GVAE vs scVI vs Scanpy (elastic-net LR on embeddings)")
 for ds_name, ds_key in [("Melanoma", "melanoma"), ("NSCLC ICI", "nsclc_ici")]:
     bench_dir = os.path.join(RESULTS, f"{ds_key}_benchmark_cv")
     results_file = os.path.join(bench_dir, "benchmark_cv_results.json")
@@ -128,6 +237,7 @@ for ds_name, ds_key in [("Melanoma", "melanoma"), ("NSCLC ICI", "nsclc_ici")]:
         print(f"\n  {ds_name} (n={r.get('n_patients','?')} patients, {r.get('n_folds','?')}-fold CV):")
         print(f"    {'Method':<12s} {'AUROC':>14s} {'AUPRC':>14s}")
         print(f"    {'-'*12} {'-'*14} {'-'*14}")
+        method_folds = {}
         for method in ["gvae", "scvi", "scanpy"]:
             data = cv.get(method, {})
             if data:
@@ -136,6 +246,24 @@ for ds_name, ds_key in [("Melanoma", "melanoma"), ("NSCLC ICI", "nsclc_ici")]:
                 pm = data.get("auprc_mean", 0)
                 pstd = data.get("auprc_std", 0)
                 print(f"    {method:<12s} {am:.3f}+/-{astd:.3f}  {pm:.3f}+/-{pstd:.3f}")
+                folds = data.get("fold_aurocs") or data.get("auroc_per_fold") or []
+                if folds:
+                    method_folds[method] = folds
+
+        # Paired Wilcoxon tests against GVAE
+        if 'gvae' in method_folds:
+            gvae_folds = method_folds['gvae']
+            test_lines = []
+            for other in ['scanpy', 'scvi']:
+                if other in method_folds:
+                    stat, p = _paired_test(gvae_folds, method_folds[other])
+                    if p is not None:
+                        sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "n.s."
+                        test_lines.append(f"GVAE vs {other}: Wilcoxon p={p:.3f} {sig}")
+            if test_lines:
+                print(f"    Paired tests (per-fold AUROCs):")
+                for line in test_lines:
+                    print(f"      {line}")
     else:
         log_file = os.path.join(RESULTS, f"benchmark_{ds_key}.log")
         if os.path.exists(log_file):
