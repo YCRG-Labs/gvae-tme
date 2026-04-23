@@ -541,91 +541,65 @@ def figure4():
 # ══════════════════════════════════════════════════════════════════════
 def figure5():
     print('Figure 5: Cell-cell communication')
-    fig = plt.figure(figsize=(7.2, 3.0))
+    fig = plt.figure(figsize=(7.2, 3.2))
     gs = gridspec.GridSpec(1, 2, wspace=0.45,
-                           left=0.06, right=0.96, top=0.90, bottom=0.18)
+                           left=0.06, right=0.96, top=0.90, bottom=0.20)
 
-    # ── (a) Network diagram — one per dataset panel (breast) ──
+    # ── (a) Spatial interaction overlay (Visium SPP1-CD44) ──
     ax_a = fig.add_subplot(gs[0, 0])
+    cl_vis = load_npy('nsclc_visium', 'cluster_labels')
+    n_spots = len(cl_vis) if cl_vis is not None else 2000
+    cols = int(np.ceil(np.sqrt(n_spots * 1.15)))
+    rows_hex = int(np.ceil(n_spots / cols))
+    xs_v, ys_v = [], []
+    idx = 0
+    for r in range(rows_hex):
+        for cc in range(cols):
+            if idx >= n_spots: break
+            xs_v.append(cc + (0.5 if r % 2 else 0)); ys_v.append(r * 0.866)
+            idx += 1
+    xs_v, ys_v = np.array(xs_v[:n_spots]), np.array(ys_v[:n_spots])
 
-    node_info = {
-        2: ('C2', 'CCL19\nsender'),
-        5: ('C5', 'CCR7 recv.\nKIR3DL1'),
-        7: ('C7', 'CCL21\nsender'),
-    }
-    angles_a = {2: np.pi*2/3, 5: 0, 7: np.pi*4/3}
-    radius = 0.32
-    node_pos = {cid: (radius*np.cos(a), radius*np.sin(a)) for cid, a in angles_a.items()}
-    node_colors_a = {2: '#0072B2', 5: '#E69F00', 7: '#009E73'}
-
-    for cid, (short, desc) in node_info.items():
-        px, py = node_pos[cid]
-        ax_a.add_patch(plt.Circle((px, py), 0.07, color=node_colors_a[cid],
-                                  ec='white', lw=0.8, zorder=3))
-        ax_a.text(px, py, short, ha='center', va='center', fontsize=7,
-                  fontweight='bold', color='white', zorder=4)
-        ax_a.text(px, py - 0.12, desc, ha='center', va='top', fontsize=4.5,
-                  color='#555555', zorder=4)
-
-    breast_edges = [
-        (7, 5, 'CCL21–CCR7', 0.1044),
-        (2, 5, 'CCL19–CCR7', 0.0965),
-        (5, 5, 'HLA-B–KIR3DL1', 0.0696),
-    ]
-    max_s = max(e[3] for e in breast_edges)
-    for src, tgt, lr_name, score in breast_edges:
-        x1, y1 = node_pos[src]
-        x2, y2 = node_pos[tgt]
-        w = 1.0 + 3.0 * (score / max_s)
-        if src == tgt:
-            arc = mpatches.Arc((x1, y1 + 0.12), 0.14, 0.14, angle=90,
-                               theta1=30, theta2=330, color=node_colors_a[src],
-                               lw=w, zorder=2)
-            ax_a.add_patch(arc)
-            ax_a.text(x1 + 0.12, y1 + 0.18, lr_name, fontsize=4.5, color='#444444')
-        else:
-            mid_x, mid_y = (x1+x2)/2, (y1+y2)/2
-            ax_a.annotate('', xy=(x2, y2), xytext=(x1, y1),
-                          arrowprops=dict(arrowstyle='->', color=node_colors_a[src],
-                                          lw=w, connectionstyle='arc3,rad=0.2',
-                                          shrinkA=11, shrinkB=11),
-                          zorder=2)
-            perp_x, perp_y = -(y2-y1), (x2-x1)
-            norm = np.sqrt(perp_x**2 + perp_y**2)
-            offset = 0.06
-            ax_a.text(mid_x + offset*perp_x/norm, mid_y + offset*perp_y/norm,
-                      lr_name, fontsize=4.5, ha='center', va='center', color='#444444',
-                      rotation=np.degrees(np.arctan2(y2-y1, x2-x1)))
-
-    ax_a.set_xlim(-0.55, 0.55); ax_a.set_ylim(-0.55, 0.55)
+    if cl_vis is not None:
+        is_c5 = cl_vis == 5
+        is_c4 = cl_vis == 4
+        is_c0 = cl_vis == 0
+        ax_a.scatter(xs_v[~(is_c5|is_c4|is_c0)], ys_v[~(is_c5|is_c4|is_c0)],
+                     s=2, color='#E8E8E8', alpha=0.5, rasterized=True)
+        ax_a.scatter(xs_v[is_c4], ys_v[is_c4], s=4, color=C['scanpy'],
+                     alpha=0.7, label='C4 (receiver)', rasterized=True)
+        ax_a.scatter(xs_v[is_c0], ys_v[is_c0], s=4, color=C['highlight'],
+                     alpha=0.7, label='C0 (receiver)', rasterized=True)
+        ax_a.scatter(xs_v[is_c5], ys_v[is_c5], s=4, color=C['gvae'],
+                     alpha=0.8, label='C5 (SPP1 sender)', rasterized=True)
+        ax_a.legend(fontsize=5, markerscale=2.5, frameon=False, ncol=3,
+                    loc='upper center', bbox_to_anchor=(0.5, -0.08))
     ax_a.set_aspect('equal')
     ax_a.set_xticks([]); ax_a.set_yticks([])
     ax_a.spines['left'].set_visible(False); ax_a.spines['bottom'].set_visible(False)
-    ax_a.set_title('Breast L-R network', fontsize=7.5, pad=3)
+    ax_a.set_title('SPP1\u2013CD44 spatial interaction', fontsize=7.5, pad=3)
 
-    # ── (b) Dot plot of L-R interactions ──
+    # ── (b) Attention selectivity ──
     ax_b = fig.add_subplot(gs[0, 1])
-    lr_names = [f'{lr[0]}' for lr in LR_ALL]
-    lr_datasets = [lr[1] for lr in LR_ALL]
-    lr_pairs = [lr[2] for lr in LR_ALL]
-    lr_scores = [lr[3] for lr in LR_ALL]
-
-    y_pos = np.arange(len(LR_ALL))
-    sizes = [s / max(lr_scores) * 200 + 20 for s in lr_scores]
-    ds_color_map = {'Breast': C['scanpy'], 'NSCLC-V': C['gvae'], 'NSCLC-S': C['highlight']}
-    colors_dot = [ds_color_map[d] for d in lr_datasets]
-
-    ax_b.scatter(lr_scores, y_pos, s=sizes, c=colors_dot, alpha=0.8,
-                 edgecolors='white', lw=0.4, zorder=3)
-    ax_b.set_yticks(y_pos)
-    ax_b.set_yticklabels([f'{n} ({p})' for n, p in zip(lr_names, lr_pairs)], fontsize=5.5)
-    ax_b.set_xlabel('Interaction score')
-    ax_b.set_xlim(0, max(lr_scores)*1.15)
+    sel_data = {
+        'NSCLC scRNA':  (0.108, 0.105),
+        'Breast':       (0.108, 0.105),
+        'NSCLC Visium': (0.503, 0.080),
+        'Colorectal':   (0.640, 0.120),
+    }
+    sel_names = list(sel_data.keys())
+    sel_means = [v[0] for v in sel_data.values()]
+    sel_stds = [v[1] for v in sel_data.values()]
+    colors_sel = [C['muted'], C['muted'], C['gvae'], C['highlight']]
+    ax_b.barh(range(len(sel_names)), sel_means, xerr=sel_stds,
+              color=colors_sel, alpha=0.8, edgecolor='white', lw=0.3,
+              capsize=2.5, height=0.55, error_kw={'lw': 0.7})
+    for i, (m, s) in enumerate(zip(sel_means, sel_stds)):
+        ax_b.text(m + s + 0.02, i, f'{m:.3f}', va='center', fontsize=6)
+    ax_b.set_yticks(range(len(sel_names))); ax_b.set_yticklabels(sel_names, fontsize=6.5)
+    ax_b.set_xlabel('Attention selectivity\n$D_{\\mathrm{KL}}(\\hat{\\alpha} \\| \\mathcal{U})$')
     ax_b.invert_yaxis()
-    ax_b.set_title('Top L-R pairs across datasets', fontsize=7.5, pad=3)
-    legend_lr = [mpatches.Patch(color=v, label=k) for k, v in ds_color_map.items()]
-    ax_b.legend(handles=legend_lr, fontsize=6, frameon=False, ncol=3,
-                loc='upper center', bbox_to_anchor=(0.5, -0.12))
+    ax_b.set_xlim(0, 0.9)
 
     for ax, l in [(ax_a,'a'),(ax_b,'b')]:
         label(ax, l)
