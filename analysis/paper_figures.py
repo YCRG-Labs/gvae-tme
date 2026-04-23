@@ -240,10 +240,6 @@ def figure2():
         ax.set_xlabel('False positive rate')
         ax.set_title(title_str, fontsize=8, pad=4)
         ax.legend(loc='lower right', frameon=False, handlelength=1.5, fontsize=6)
-        if d['perm_p'] > 0:
-            ax.text(0.52, 0.15, f"$p$ = {d['perm_p']:.3f}",
-                    transform=ax.transAxes, fontsize=6.5,
-                    bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='#cccccc', lw=0.4))
     ax_a.set_ylabel('True positive rate')
 
     # ── Row 2: benchmark bars + per-fold strip ──
@@ -266,7 +262,8 @@ def figure2():
     ax_d.set_xticks(x); ax_d.set_xticklabels(cohort_labels)
     ax_d.set_ylabel('AUROC (embed + L1-LogReg)')
     ax_d.set_ylim(0.35, 0.95)
-    ax_d.legend(loc='upper left', frameon=False, ncol=3, fontsize=6, columnspacing=0.8)
+    ax_d.legend(loc='upper center', bbox_to_anchor=(0.5, 1.18), frameon=False,
+                ncol=3, fontsize=6, columnspacing=0.8)
 
     gvae_e2e = {
         'NSCLC\nICI':    CV['nsclc'],
@@ -390,8 +387,9 @@ def figure3():
             mask = cl_vis == ci
             ax_e.scatter(umap_vis[mask, 0], umap_vis[mask, 1], s=2,
                          color=cmap_e(ci), alpha=0.6, label=f'C{ci}', rasterized=True)
-        ax_e.legend(fontsize=4.5, markerscale=3, ncol=2, frameon=False,
-                    loc='upper right', handletextpad=0.1, columnspacing=0.3)
+        ax_e.legend(fontsize=4.5, markerscale=3, ncol=4, frameon=False,
+                    loc='upper center', bbox_to_anchor=(0.5, -0.08),
+                    handletextpad=0.1, columnspacing=0.5)
     ax_e.set_xticks([]); ax_e.set_yticks([])
     ax_e.set_xlabel('UMAP 1', fontsize=7)
     ax_e.set_title('NSCLC Visium', fontsize=7.5, pad=3)
@@ -447,8 +445,9 @@ def figure4():
                 ax_a.scatter(umap_mel[mask_rc, 0], umap_mel[mask_rc, 1],
                              s=5, color=cmap_r(j), alpha=0.8, label=f'Rare C{rc}',
                              edgecolors='white', lw=0.2, rasterized=True)
-            ax_a.legend(fontsize=5, markerscale=2, frameon=False, loc='upper right',
-                        handletextpad=0.2)
+            ax_a.legend(fontsize=4.5, markerscale=2, frameon=False, ncol=4,
+                        loc='upper center', bbox_to_anchor=(0.5, -0.08),
+                        handletextpad=0.2, columnspacing=0.5)
         else:
             ax_a.scatter(umap_mel[is_rare, 0], umap_mel[is_rare, 1],
                          s=5, color=C['gvae'], alpha=0.8, rasterized=True)
