@@ -157,7 +157,7 @@ LR_ALL = [
 ]
 
 
-def label(ax, txt, x=-0.12, y=1.06):
+def label(ax, txt, x=-0.15, y=1.10):
     ax.text(x, y, txt, transform=ax.transAxes, fontsize=10, fontweight='bold', va='top')
 
 
@@ -299,9 +299,9 @@ def figure2():
 # ══════════════════════════════════════════════════════════════════════
 def figure3():
     print('Figure 3: Spatial integration')
-    fig = plt.figure(figsize=(7.2, 5.5))
-    gs = gridspec.GridSpec(2, 3, hspace=0.55, wspace=0.45,
-                           left=0.07, right=0.96, top=0.92, bottom=0.08)
+    fig = plt.figure(figsize=(7.5, 5.8))
+    gs = gridspec.GridSpec(2, 3, hspace=0.60, wspace=0.55,
+                           left=0.08, right=0.96, top=0.92, bottom=0.08)
 
     # ── (a) Spatial scatter of gate values on Visium hex grid ──
     ax_a = fig.add_subplot(gs[0, 0])
@@ -338,10 +338,9 @@ def figure3():
     for i, v in enumerate(vals):
         ax_b.text(i, v + 0.03, f'{v:.3f}', ha='center', fontsize=6.5)
     ax_b.set_xticks(range(len(names))); ax_b.set_xticklabels(names, fontsize=6.5)
-    ax_b.set_ylabel('Mean gate value $\\bar{g}$')
+    ax_b.set_ylabel('Mean gate $\\bar{g}$', fontsize=7)
     ax_b.set_ylim(0, 1.15)
     ax_b.axhline(0.5, color=C['chance'], ls=':', lw=0.5)
-    ax_b.text(len(names)-1, 0.53, 'molecular = spatial', fontsize=5.5, color='#888888', ha='center')
 
     # ── (c) Moran's I with null distribution ──
     ax_c = fig.add_subplot(gs[0, 2])
@@ -356,12 +355,10 @@ def figure3():
     null = np.random.RandomState(42).normal(0.0, 0.035, 1000)
     ax_c.hist(null, bins=35, color='#DDDDDD', edgecolor='#BBBBBB', lw=0.3, density=True)
     ax_c.axvline(obs_I, color=C['gvae'], lw=1.5, ls='-', label=f"Observed $I$ = {obs_I:.3f}")
-    ax_c.set_xlabel("Moran's $I$")
-    ax_c.set_ylabel('Density')
-    ax_c.set_title('Spatial autocorrelation\nof gate values', fontsize=7, pad=3)
-    ax_c.legend(frameon=False, fontsize=6)
-    ax_c.text(0.95, 0.85, '$p$ < 0.001', transform=ax_c.transAxes, fontsize=6.5, ha='right',
-              bbox=dict(boxstyle='round,pad=0.2', fc='white', ec='#cccccc', lw=0.4))
+    ax_c.set_xlabel("Moran's $I$", fontsize=7)
+    ax_c.set_ylabel('Density', fontsize=7)
+    ax_c.set_title('Gate spatial autocorrelation', fontsize=7, pad=4)
+    ax_c.legend(frameon=False, fontsize=5.5, loc='upper left')
 
     # ── (d) UMAP melanoma colored by cluster ──
     ax_d = fig.add_subplot(gs[1, 0])
