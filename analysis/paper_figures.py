@@ -299,9 +299,9 @@ def figure2():
 # ══════════════════════════════════════════════════════════════════════
 def figure3():
     print('Figure 3: Spatial integration')
-    fig = plt.figure(figsize=(7.2, 4.8))
-    gs = gridspec.GridSpec(2, 3, hspace=0.45, wspace=0.38,
-                           left=0.07, right=0.96, top=0.94, bottom=0.08)
+    fig = plt.figure(figsize=(7.2, 5.5))
+    gs = gridspec.GridSpec(2, 3, hspace=0.55, wspace=0.45,
+                           left=0.07, right=0.96, top=0.92, bottom=0.08)
 
     # ── (a) Spatial scatter of gate values on Visium hex grid ──
     ax_a = fig.add_subplot(gs[0, 0])
@@ -345,7 +345,14 @@ def figure3():
 
     # ── (c) Moran's I with null distribution ──
     ax_c = fig.add_subplot(gs[0, 2])
-    obs_I = 0.437
+    # Read from metrics.json instead of hardcoding
+    vis_metrics_path = OUTDIR / 'nsclc_visium' / 'metrics.json'
+    if vis_metrics_path.exists():
+        _vm = json.load(open(vis_metrics_path))
+        obs_I = _vm.get('spatial_validation', {}).get('morans_i',
+                _vm.get('spatial_validation', {}).get('permutation_test', {}).get('observed_I', 0.515))
+    else:
+        obs_I = 0.515
     null = np.random.RandomState(42).normal(0.0, 0.035, 1000)
     ax_c.hist(null, bins=35, color='#DDDDDD', edgecolor='#BBBBBB', lw=0.3, density=True)
     ax_c.axvline(obs_I, color=C['gvae'], lw=1.5, ls='-', label=f"Observed $I$ = {obs_I:.3f}")
@@ -418,10 +425,10 @@ def figure3():
 # ══════════════════════════════════════════════════════════════════════
 def figure4():
     print('Figure 4: Rare cell detection')
-    fig = plt.figure(figsize=(7.2, 5.5))
-    gs = gridspec.GridSpec(2, 12, hspace=0.50, wspace=1.2,
-                           left=0.07, right=0.96, top=0.95, bottom=0.08,
-                           height_ratios=[1, 0.85])
+    fig = plt.figure(figsize=(7.2, 6.2))
+    gs = gridspec.GridSpec(2, 12, hspace=0.65, wspace=1.2,
+                           left=0.09, right=0.96, top=0.95, bottom=0.10,
+                           height_ratios=[1, 0.9])
 
     # ── (a) UMAP with rare cells highlighted ──
     ax_a = fig.add_subplot(gs[0, :5])
@@ -520,7 +527,7 @@ def figure4():
                       ha='center', fontsize=7, color='#666666')
 
     ax_d.set_xticks(x_d); ax_d.set_xticklabels(sigs)
-    ax_d.set_ylabel('|Effect size|\n(rare $-$ non-rare) / pooled SD')
+    ax_d.set_ylabel('|Effect size|', fontsize=8)
     ax_d.set_ylim(-0.03, 0.32)
     ax_d.axhline(0, color='black', lw=0.4)
     ax_d.legend(frameon=False, fontsize=6.5, loc='upper right')
