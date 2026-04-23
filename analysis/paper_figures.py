@@ -543,9 +543,9 @@ def figure4():
 # ══════════════════════════════════════════════════════════════════════
 def figure5():
     print('Figure 5: Cell-cell communication')
-    fig = plt.figure(figsize=(7.2, 5.0))
-    gs = gridspec.GridSpec(2, 2, hspace=0.48, wspace=0.45,
-                           left=0.06, right=0.96, top=0.94, bottom=0.08)
+    fig = plt.figure(figsize=(7.2, 3.0))
+    gs = gridspec.GridSpec(1, 2, wspace=0.45,
+                           left=0.06, right=0.96, top=0.90, bottom=0.18)
 
     # ── (a) Network diagram — one per dataset panel (breast) ──
     ax_a = fig.add_subplot(gs[0, 0])
@@ -626,67 +626,10 @@ def figure5():
     ax_b.invert_yaxis()
     ax_b.set_title('Top L-R pairs across datasets', fontsize=7.5, pad=3)
     legend_lr = [mpatches.Patch(color=v, label=k) for k, v in ds_color_map.items()]
-    ax_b.legend(handles=legend_lr, fontsize=5, frameon=False, loc='lower right')
+    ax_b.legend(handles=legend_lr, fontsize=6, frameon=False, ncol=3,
+                loc='upper center', bbox_to_anchor=(0.5, -0.12))
 
-    # ── (c) Spatial interaction overlay (Visium SPP1-CD44) ──
-    ax_c = fig.add_subplot(gs[1, 0])
-    cl_vis = load_npy('nsclc_visium', 'cluster_labels')
-    gate_vis = load_npy('nsclc_visium', 'gate_values')
-    n_spots = len(cl_vis) if cl_vis is not None else 2000
-    cols = int(np.ceil(np.sqrt(n_spots * 1.15)))
-    rows_hex = int(np.ceil(n_spots / cols))
-    xs_v, ys_v = [], []
-    idx = 0
-    for r in range(rows_hex):
-        for cc in range(cols):
-            if idx >= n_spots: break
-            xs_v.append(cc + (0.5 if r % 2 else 0)); ys_v.append(r * 0.866)
-            idx += 1
-    xs_v, ys_v = np.array(xs_v[:n_spots]), np.array(ys_v[:n_spots])
-
-    if cl_vis is not None:
-        is_c5 = cl_vis == 5
-        is_c4 = cl_vis == 4
-        is_c0 = cl_vis == 0
-        ax_c.scatter(xs_v[~(is_c5|is_c4|is_c0)], ys_v[~(is_c5|is_c4|is_c0)],
-                     s=2, color='#E8E8E8', alpha=0.5, rasterized=True)
-        ax_c.scatter(xs_v[is_c4], ys_v[is_c4], s=4, color=C['scanpy'],
-                     alpha=0.7, label='C4 (receiver)', rasterized=True)
-        ax_c.scatter(xs_v[is_c0], ys_v[is_c0], s=4, color=C['highlight'],
-                     alpha=0.7, label='C0 (receiver)', rasterized=True)
-        ax_c.scatter(xs_v[is_c5], ys_v[is_c5], s=4, color=C['gvae'],
-                     alpha=0.8, label='C5 (SPP1 sender)', rasterized=True)
-        ax_c.legend(fontsize=5, markerscale=2.5, frameon=False, loc='lower right')
-    ax_c.set_aspect('equal')
-    ax_c.set_xticks([]); ax_c.set_yticks([])
-    ax_c.spines['left'].set_visible(False); ax_c.spines['bottom'].set_visible(False)
-    ax_c.set_title('SPP1–CD44 spatial interaction', fontsize=7.5, pad=3)
-
-    # ── (d) Attention selectivity ──
-    ax_d = fig.add_subplot(gs[1, 1])
-    sel_data = {
-        'NSCLC scRNA':  (0.108, 0.105),
-        'Breast':       (0.108, 0.105),
-        'NSCLC Visium': (0.503, 0.080),
-        'Colorectal':   (0.640, 0.120),
-    }
-    sel_names = list(sel_data.keys())
-    sel_means = [v[0] for v in sel_data.values()]
-    sel_stds = [v[1] for v in sel_data.values()]
-    colors_sel = [C['muted'], C['muted'], C['gvae'], C['highlight']]
-    ax_d.barh(range(len(sel_names)), sel_means, xerr=sel_stds,
-              color=colors_sel, alpha=0.8, edgecolor='white', lw=0.3,
-              capsize=2.5, height=0.55, error_kw={'lw': 0.7})
-    for i, (m, s) in enumerate(zip(sel_means, sel_stds)):
-        ax_d.text(m + s + 0.02, i, f'{m:.3f}', va='center', fontsize=6)
-    ax_d.set_yticks(range(len(sel_names))); ax_d.set_yticklabels(sel_names, fontsize=6.5)
-    ax_d.set_xlabel('Attention selectivity\n$D_{\\mathrm{KL}}(\\hat{\\alpha} \\| \\mathcal{U})$')
-    ax_d.invert_yaxis()
-    ax_d.set_xlim(0, 0.9)
-    ax_d.text(0.95, 0.05, 'Higher = more\nselective attention',
-              transform=ax_d.transAxes, fontsize=5.5, ha='right', color='#888888')
-
-    for ax, l in [(ax_a,'a'),(ax_b,'b'),(ax_c,'c'),(ax_d,'d')]:
+    for ax, l in [(ax_a,'a'),(ax_b,'b')]:
         label(ax, l)
 
     save(fig, 'fig5_communication')
