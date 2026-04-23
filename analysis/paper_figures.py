@@ -529,8 +529,6 @@ def figure4():
     ax_d.set_ylim(-0.03, 0.32)
     ax_d.axhline(0, color='black', lw=0.4)
     ax_d.legend(frameon=False, fontsize=6.5, loc='upper right')
-    ax_d.text(0.01, 0.95, 'Sign shown below each bar (− = lower in rare cells)',
-              transform=ax_d.transAxes, fontsize=5.5, color='#888888', va='top')
 
     for ax, l in [(ax_a,'a'),(ax_b,'b'),(ax_c,'c'),(ax_d,'d')]:
         label(ax, l)
