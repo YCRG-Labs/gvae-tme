@@ -627,7 +627,7 @@ def figure5():
     ax_c = fig.add_subplot(gs[1, 0])
     cl_vis = load_npy('nsclc_visium', 'cluster_labels')
     gate_vis = load_npy('nsclc_visium', 'gate_values')
-    n_spots = 2000
+    n_spots = len(cl_vis) if cl_vis is not None else 2000
     cols = int(np.ceil(np.sqrt(n_spots * 1.15)))
     rows_hex = int(np.ceil(n_spots / cols))
     xs_v, ys_v = [], []
