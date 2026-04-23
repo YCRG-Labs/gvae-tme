@@ -405,8 +405,9 @@ def figure3():
             mask = cl_vis == ci
             ax_f.scatter(xs[mask], ys[mask], s=3, color=cmap_f(ci),
                          alpha=0.7, label=f'C{ci}', rasterized=True)
-        ax_f.legend(fontsize=4.5, markerscale=3, ncol=2, frameon=False,
-                    loc='upper right', handletextpad=0.1, columnspacing=0.3)
+        ax_f.legend(fontsize=4.5, markerscale=3, ncol=4, frameon=False,
+                    loc='upper center', bbox_to_anchor=(0.5, -0.05),
+                    handletextpad=0.1, columnspacing=0.5)
     ax_f.set_aspect('equal')
     ax_f.set_xticks([]); ax_f.set_yticks([])
     ax_f.set_title('Spatial clusters', fontsize=7.5, pad=3)
