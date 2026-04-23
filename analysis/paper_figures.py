@@ -14,8 +14,8 @@ from sklearn.metrics import roc_curve
 import json, warnings
 warnings.filterwarnings('ignore')
 
-OUTDIR = Path('/Users/jacobcrainic/gvae-tme/outputs')
-FIGDIR = Path('/Users/jacobcrainic/gvae-tme/figures')
+OUTDIR = Path(__file__).parent.parent / 'outputs'
+FIGDIR = Path(__file__).parent.parent / 'figures'
 FIGDIR.mkdir(exist_ok=True)
 
 plt.rcParams.update({
