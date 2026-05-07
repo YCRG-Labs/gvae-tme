@@ -8,6 +8,12 @@ fi
 PIP="python3 -m pip install $PIP_FLAGS"
 
 echo ""
+echo "--- shared deps (POT for GraphST, torch_geometric for STAGATE_pyG) ---"
+$PIP POT || echo "[warn] POT install failed; GraphST will fail to import"
+python3 -c "import torch_geometric" 2>/dev/null || \
+    $PIP torch_geometric || echo "[warn] torch_geometric install failed; STAGATE_pyG will fail to import"
+
+echo ""
 echo "--- GraphST ---"
 $PIP GraphST==1.1.1 || $PIP GraphST || echo "[warn] GraphST install failed"
 
