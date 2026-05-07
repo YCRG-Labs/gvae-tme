@@ -1,7 +1,11 @@
 #!/bin/bash
 echo "=== Installing spatial-graph baselines ==="
 
-PIP="python3 -m pip install"
+PIP_FLAGS=""
+if python3 -m pip install --help 2>&1 | grep -q break-system-packages; then
+    PIP_FLAGS="--break-system-packages"
+fi
+PIP="python3 -m pip install $PIP_FLAGS"
 
 echo ""
 echo "--- GraphST ---"
