@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.model_selection import StratifiedKFold, LeaveOneOut, RepeatedStratifiedKFold
@@ -39,6 +41,21 @@ def _fit_elastic_net_lr(X_train, y_train, seed=42):
             random_state=seed,
         )
     clf.fit(X_train, y_train)
+
+    if os.environ.get('GVAE_DEBUG_LR'):
+        coef = getattr(clf, 'coef_', np.zeros((1, X_train.shape[1])))
+        n_nonzero = int((np.abs(coef) > 1e-8).sum())
+        try:
+            pred_var = float(clf.decision_function(X_train).var())
+        except Exception:
+            pred_var = float('nan')
+        chosen_l1r = getattr(clf, 'l1_ratio_', None)
+        chosen_C = getattr(clf, 'C_', None)
+        print(f"  [elastic-net diag] n_train={X_train.shape[0]} "
+              f"n_features={X_train.shape[1]} "
+              f"nonzero_coef={n_nonzero}/{coef.size} "
+              f"pred_var={pred_var:.4g} "
+              f"chosen_l1_ratio={chosen_l1r} chosen_C={chosen_C}")
     return clf
 
 

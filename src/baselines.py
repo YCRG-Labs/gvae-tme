@@ -1,4 +1,5 @@
 import warnings
+import os
 
 import numpy as np
 import pandas as pd
@@ -295,3 +296,209 @@ class CrossDatasetTransfer:
                 print(f"  Transfer rare marker Jaccard: {concordance['mean_jaccard']:.3f}")
 
         return results
+
+
+def _evaluate_spatial_clustering(z, labels, coords, ground_truth=None, k_moran=15):
+    from sklearn.metrics import silhouette_score
+    n_clusters = int(len(np.unique(labels)))
+    out = {'n_clusters': n_clusters}
+
+    if n_clusters > 1 and coords is not None:
+        try:
+            out['silhouette_spatial'] = float(silhouette_score(coords, labels))
+        except Exception as e:
+            out['silhouette_spatial'] = None
+            out['silhouette_error'] = str(e)
+    else:
+        out['silhouette_spatial'] = None
+
+    if z is not None and n_clusters > 1:
+        try:
+            out['silhouette_embedding'] = float(silhouette_score(z, labels))
+        except Exception:
+            out['silhouette_embedding'] = None
+
+    if coords is not None and n_clusters > 1:
+        from src.analysis import BiologicalValidation
+        m = BiologicalValidation.morans_i(labels.astype(float), coords, k=k_moran)
+        out['morans_i'] = m['morans_i']
+        out['morans_i_p'] = m.get('p_value')
+
+    if ground_truth is not None:
+        from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+        gt = np.asarray(ground_truth)
+        mask = ~pd.isna(gt) if hasattr(pd, 'isna') else np.ones(len(gt), bool)
+        if mask.sum() > 1:
+            out['ARI'] = float(adjusted_rand_score(gt[mask], labels[mask]))
+            out['NMI'] = float(normalized_mutual_info_score(gt[mask], labels[mask]))
+
+    return out
+
+
+class GraphSTBaseline:
+
+    @staticmethod
+    def run(adata, n_clusters=7, device='cuda', radius=50, n_top_genes=3000,
+            ground_truth_key=None):
+        try:
+            from GraphST import GraphST
+            from GraphST.utils import clustering as graphst_clustering
+        except ImportError as e:
+            return {'method': 'graphst',
+                    'note': f'GraphST not installed ({e}). pip install GraphST'}
+
+        if 'spatial' not in adata.obsm:
+            return {'method': 'graphst', 'note': 'adata.obsm["spatial"] missing'}
+
+        ad = adata.copy()
+        if ad.n_vars > n_top_genes and 'highly_variable' not in ad.var:
+            sc.pp.highly_variable_genes(ad, n_top_genes=n_top_genes, flavor='seurat_v3')
+            ad = ad[:, ad.var['highly_variable']].copy()
+
+        print(f"  GraphST: training on {ad.n_obs} spots x {ad.n_vars} genes "
+              f"(device={device})")
+        model = GraphST.GraphST(ad, device=device, random_seed=42)
+        ad = model.train()
+
+        try:
+            graphst_clustering(ad, n_clusters=n_clusters, method='mclust', radius=radius,
+                               refinement=True)
+            labels = ad.obs['domain'].astype(int).values
+        except Exception as e:
+            print(f"  GraphST: mclust failed ({e}); falling back to leiden")
+            sc.pp.neighbors(ad, use_rep='emb')
+            sc.tl.leiden(ad, resolution=0.5)
+            labels = ad.obs['leiden'].astype(int).values
+
+        z = ad.obsm.get('emb')
+        coords = ad.obsm.get('spatial')
+        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+
+        metrics = _evaluate_spatial_clustering(z, labels, coords, ground_truth=gt)
+        print(f"  GraphST: {metrics['n_clusters']} clusters, "
+              f"silhouette_spatial={metrics.get('silhouette_spatial')}, "
+              f"morans_i={metrics.get('morans_i')}")
+
+        return {'method': 'graphst', 'z': z, 'labels': labels, 'clustering': metrics}
+
+
+class STAGATEBaseline:
+
+    @staticmethod
+    def run(adata, rad_cutoff=150, leiden_resolution=0.5, n_top_genes=3000,
+            ground_truth_key=None):
+        try:
+            import STAGATE_pyG as STAGATE
+        except ImportError as e:
+            return {'method': 'stagate',
+                    'note': f'STAGATE_pyG not installed ({e}). pip install STAGATE_pyG'}
+
+        if 'spatial' not in adata.obsm:
+            return {'method': 'stagate', 'note': 'adata.obsm["spatial"] missing'}
+
+        ad = adata.copy()
+        if ad.n_vars > n_top_genes and 'highly_variable' not in ad.var:
+            sc.pp.highly_variable_genes(ad, n_top_genes=n_top_genes, flavor='seurat_v3')
+            ad = ad[:, ad.var['highly_variable']].copy()
+
+        print(f"  STAGATE: building spatial graph (rad_cutoff={rad_cutoff})")
+        STAGATE.Cal_Spatial_Net(ad, rad_cutoff=rad_cutoff)
+        STAGATE.Stats_Spatial_Net(ad)
+
+        print(f"  STAGATE: training on {ad.n_obs} spots x {ad.n_vars} genes")
+        ad = STAGATE.train_STAGATE(ad)
+
+        z = ad.obsm['STAGATE']
+        sc.pp.neighbors(ad, use_rep='STAGATE')
+        sc.tl.leiden(ad, resolution=leiden_resolution)
+        labels = ad.obs['leiden'].astype(int).values
+
+        coords = ad.obsm.get('spatial')
+        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+
+        metrics = _evaluate_spatial_clustering(z, labels, coords, ground_truth=gt)
+        print(f"  STAGATE: {metrics['n_clusters']} clusters, "
+              f"silhouette_spatial={metrics.get('silhouette_spatial')}, "
+              f"morans_i={metrics.get('morans_i')}")
+
+        return {'method': 'stagate', 'z': z, 'labels': labels, 'clustering': metrics}
+
+
+class SpaGCNBaseline:
+
+    @staticmethod
+    def run(adata, histology_path=None, n_clusters=7, p=0.5, n_top_genes=3000,
+            ground_truth_key=None, seed=42):
+        try:
+            import SpaGCN as spg
+            import torch
+        except ImportError as e:
+            return {'method': 'spagcn',
+                    'note': f'SpaGCN not installed ({e}). pip install SpaGCN'}
+
+        if 'spatial' not in adata.obsm:
+            return {'method': 'spagcn', 'note': 'adata.obsm["spatial"] missing'}
+
+        ad = adata.copy()
+        if ad.n_vars > n_top_genes and 'highly_variable' not in ad.var:
+            sc.pp.highly_variable_genes(ad, n_top_genes=n_top_genes, flavor='seurat_v3')
+            ad = ad[:, ad.var['highly_variable']].copy()
+
+        coords = ad.obsm['spatial']
+        x = coords[:, 0].astype(int)
+        y = coords[:, 1].astype(int)
+
+        img = None
+        use_histology = False
+        if histology_path is not None and os.path.exists(histology_path):
+            try:
+                import cv2
+                img = cv2.imread(histology_path)
+                if img is not None:
+                    use_histology = True
+                    print(f"  SpaGCN: loaded histology {histology_path} shape={img.shape}")
+            except Exception as e:
+                print(f"  SpaGCN: histology load failed ({e}); using coords-only adjacency")
+
+        if use_histology:
+            x_pix = ad.obs.get('pxl_col_in_fullres', x).astype(int).values \
+                if 'pxl_col_in_fullres' in ad.obs.columns else x
+            y_pix = ad.obs.get('pxl_row_in_fullres', y).astype(int).values \
+                if 'pxl_row_in_fullres' in ad.obs.columns else y
+            adj = spg.calculate_adj_matrix(x=x, y=y, x_pixel=x_pix, y_pixel=y_pix,
+                                           image=img, beta=49, alpha=1, histology=True)
+        else:
+            adj = spg.calculate_adj_matrix(x=x, y=y, histology=False)
+
+        l_search = spg.search_l(p, adj, start=0.01, end=1000, tol=0.01, max_run=100)
+
+        r_seed = seed
+        try:
+            r_search = spg.search_res(ad, adj, l_search, n_clusters, start=0.7,
+                                      step=0.1, tol=5e-3, lr=0.05, max_epochs=20,
+                                      r_seed=r_seed, t_seed=r_seed, n_seed=r_seed)
+        except Exception as e:
+            print(f"  SpaGCN: search_res failed ({e}); using r=1.0")
+            r_search = 1.0
+
+        clf = spg.SpaGCN()
+        clf.set_l(l_search)
+        torch.manual_seed(r_seed)
+        np.random.seed(r_seed)
+        clf.train(ad, adj, init_spa=True, init='louvain', res=r_search, tol=5e-3,
+                  lr=0.05, max_epochs=200)
+        y_pred, prob = clf.predict()
+        labels = np.asarray(y_pred).astype(int)
+
+        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+        metrics = _evaluate_spatial_clustering(z=None, labels=labels, coords=coords,
+                                                ground_truth=gt)
+        metrics['used_histology'] = bool(use_histology)
+        metrics['l'] = float(l_search)
+        metrics['res'] = float(r_search)
+        print(f"  SpaGCN: {metrics['n_clusters']} clusters "
+              f"(histology={use_histology}), "
+              f"silhouette_spatial={metrics.get('silhouette_spatial')}, "
+              f"morans_i={metrics.get('morans_i')}")
+
+        return {'method': 'spagcn', 'z': None, 'labels': labels, 'clustering': metrics}
