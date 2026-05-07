@@ -372,7 +372,7 @@ class GraphSTBaseline:
 
         z = ad.obsm.get('emb')
         coords = ad.obsm.get('spatial')
-        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+        gt = adata.obs[ground_truth_key].values if (ground_truth_key and ground_truth_key in adata.obs.columns) else None
 
         metrics = _evaluate_spatial_clustering(z, labels, coords, ground_truth=gt)
         print(f"  GraphST: {metrics['n_clusters']} clusters, "
@@ -414,7 +414,7 @@ class STAGATEBaseline:
         labels = ad.obs['leiden'].astype(int).values
 
         coords = ad.obsm.get('spatial')
-        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+        gt = adata.obs[ground_truth_key].values if (ground_truth_key and ground_truth_key in adata.obs.columns) else None
 
         metrics = _evaluate_spatial_clustering(z, labels, coords, ground_truth=gt)
         print(f"  STAGATE: {metrics['n_clusters']} clusters, "
@@ -490,7 +490,7 @@ class SpaGCNBaseline:
         y_pred, prob = clf.predict()
         labels = np.asarray(y_pred).astype(int)
 
-        gt = adata.obs[ground_truth_key].values if ground_truth_key in (adata.obs.columns or []) else None
+        gt = adata.obs[ground_truth_key].values if (ground_truth_key and ground_truth_key in adata.obs.columns) else None
         metrics = _evaluate_spatial_clustering(z=None, labels=labels, coords=coords,
                                                 ground_truth=gt)
         metrics['used_histology'] = bool(use_histology)
